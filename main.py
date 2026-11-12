@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import sys
 import urllib.request
 import uuid
@@ -11,9 +12,10 @@ from pathlib import Path
 from launcher_core import (fetch_version_metadata, summarize_version_metadata, download_verified_client,
                             download_verified_version_json, resolve_library_artifacts,
                             download_verified_libraries, resolve_asset_objects, extract_native_archives,
-                            discover_java_candidates, validate_java_executable)
+                            discover_java_candidates, validate_java_executable,
+                            build_launch_plan, verify_cached_asset_objects)
 
-from PySide6.QtCore import Qt, QSettings, QThread, Signal
+from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QPlainTextEdit, QStackedWidget, QVBoxLayout,
@@ -279,6 +281,118 @@ class JavaCheckWorker(QThread):
             self.failed.emit(str(exc))
 
 
+
+
+class LaunchCheckWorker(QThread):
+    ready = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, version_id, manifest_entry, java_executable, ram_mb,
+                 extra_jvm, account_source, nickname, parent=None):
+        super().__init__(parent)
+        self.version_id = version_id
+        self.manifest_entry = dict(manifest_entry)
+        self.java_executable = java_executable
+        self.ram_mb = ram_mb
+        self.extra_jvm = list(extra_jvm)
+        self.account_source = account_source
+        self.nickname = nickname
+
+    def run(self):
+        try:
+            if self.account_source != "Offline":
+                raise ValueError(
+                    f"{self.account_source} login is not implemented yet. "
+                    "Switch to Offline or wait for account integration."
+                )
+            if not self.nickname or len(self.nickname) > 16:
+                raise ValueError("Enter a valid offline nickname (1–16 characters).")
+            if not all(ch.isalnum() or ch == "_" for ch in self.nickname):
+                raise ValueError("Offline nickname may contain only letters, numbers and underscore.")
+
+            home = Path.home() / ".voidex"
+            version_json = home / "cache" / "versions" / self.version_id / f"{self.version_id}.json"
+            if version_json.is_symlink() or not version_json.is_file():
+                raise ValueError("Version JSON is not cached. Use Cache version JSON first.")
+            with version_json.open("r", encoding="utf-8") as stream:
+                metadata = json.load(stream)
+            if metadata.get("id") != self.version_id:
+                raise ValueError("Cached version JSON does not match the selected version.")
+
+            client = home / "cache" / "clients" / f"{self.version_id}.jar"
+            client_ref = (metadata.get("downloads") or {}).get("client") or {}
+            if not client.is_file() or client.is_symlink():
+                raise ValueError("Client JAR is missing. Download the client JAR first.")
+            if client_ref.get("size") is not None and client.stat().st_size != client_ref["size"]:
+                raise ValueError("Client JAR size mismatch; download it again.")
+            digest = hashlib.sha1()
+            with client.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest().lower() != str(client_ref.get("sha1", "")).lower():
+                raise ValueError("Client JAR SHA-1 mismatch; download it again.")
+
+            libraries = home / "libraries"
+            natives = home / "versions" / self.version_id / "natives"
+            if not natives.is_dir() or not any(natives.iterdir()):
+                raise ValueError("Native libraries are not prepared. Press Prepare natives first.")
+
+            asset_ref = metadata.get("assetIndex") or {}
+            if not isinstance(asset_ref, dict) or not asset_ref.get("id"):
+                raise ValueError("This version has no supported asset index.")
+            asset_index_path = home / "assets" / "indexes" / f"{asset_ref['id']}.json"
+            objects_root = home / "assets" / "objects"
+            verify_cached_asset_objects(asset_index_path, objects_root)
+
+            expected_java = (metadata.get("javaVersion") or {}).get("majorVersion")
+            java_candidates = [Path(self.java_executable)] if self.java_executable else discover_java_candidates()
+            java_result = None
+            errors = []
+            for candidate in java_candidates:
+                try:
+                    check = validate_java_executable(candidate, expected_java)
+                    if check["compatible"]:
+                        java_result = check
+                        break
+                    errors.append(f"{candidate}: Java {check['major']} (requires {expected_java})")
+                except ValueError as exc:
+                    errors.append(str(exc))
+            if java_result is None:
+                detail = "; ".join(errors[:3])
+                raise ValueError(
+                    f"No compatible Java runtime found (requires Java {expected_java}). "
+                    + detail
+                )
+
+            auth = {
+                "player_name": self.nickname,
+                "uuid": offline_uuid(self.nickname),
+                # Offline mode has no online bearer credential. The conventional
+                # local placeholder is explicit and never reused for online providers.
+                "access_token": "0",
+                "user_type": "legacy",
+            }
+            plan = build_launch_plan(
+                metadata,
+                java_executable=java_result["path"],
+                java_validation=java_result,
+                client_jar=client,
+                libraries_root=libraries,
+                natives_directory=natives,
+                game_directory=home / "instances" / self.version_id,
+                assets_root=home / "assets",
+                auth=auth,
+                jvm_arguments=[f"-Xms512M", f"-Xmx{self.ram_mb}M", *self.extra_jvm],
+                version_type=self.manifest_entry.get("type", "release"),
+                launcher_name="VOIDEX",
+                launcher_version="0.3",
+            )
+            Path(plan["cwd"]).mkdir(parents=True, exist_ok=True)
+            self.ready.emit(plan)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -291,6 +405,8 @@ class MainWindow(QMainWindow):
         self.asset_worker = None
         self.native_worker = None
         self.java_worker = None
+        self.launch_worker = None
+        self.minecraft_process = None
         self.selected_metadata = None
         self.selected_metadata_version = None
         self.versions = []
@@ -389,10 +505,18 @@ class MainWindow(QMainWindow):
         self.home_version = QLabel(f"Selected version: {self.selected_version}")
         self.home_version.setObjectName("Muted")
         hero_layout.addWidget(self.home_version)
-        play = QPushButton("LAUNCH MINECRAFT")
-        play.setObjectName("Primary")
-        play.clicked.connect(lambda: self.log("Launch is not enabled yet: runtime installation, Java validation and account authentication must be completed first."))
-        hero_layout.addWidget(play)
+        self.launch_button = QPushButton("LAUNCH MINECRAFT")
+        self.launch_button.setObjectName("Primary")
+        self.launch_button.clicked.connect(self.launch_selected_game)
+        hero_layout.addWidget(self.launch_button)
+        self.stop_button = QPushButton("STOP MINECRAFT")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self.stop_minecraft)
+        hero_layout.addWidget(self.stop_button)
+        self.launch_status = QLabel("Select a version, install its files, then launch.")
+        self.launch_status.setObjectName("Muted")
+        self.launch_status.setWordWrap(True)
+        hero_layout.addWidget(self.launch_status)
         layout.addWidget(hero)
         account, account_layout = self._panel("PLAYER IDENTITY", "Offline profile UUID is generated locally. Online account providers are not connected yet.")
         self.account_summary = QLabel("Source: Offline  |  UUID: pending nickname")
@@ -1000,6 +1124,114 @@ class MainWindow(QMainWindow):
         self.detect_java_button.setEnabled(True)
         self.validate_java_button.setEnabled(True)
         self.java_worker = None
+
+
+
+    def launch_selected_game(self):
+        if self.minecraft_process and self.minecraft_process.state() != QProcess.ProcessState.NotRunning:
+            self.log("Minecraft is already running.")
+            return
+        if self.launch_worker and self.launch_worker.isRunning():
+            return
+        if self.selected_metadata_version != self.selected_version:
+            QMessageBox.information(self, "VOIDEX", "Select and inspect a Minecraft version first.")
+            self._navigate(1)
+            return
+        entry = next((item for item in self.versions if item.get("id") == self.selected_version), None)
+        if not entry:
+            QMessageBox.information(self, "VOIDEX", "The selected version is not in the loaded Mojang catalog.")
+            return
+        try:
+            extra_jvm = shlex.split(self.jvm.text().strip()) if self.jvm.text().strip() else []
+        except ValueError as exc:
+            QMessageBox.warning(self, "VOIDEX", f"Invalid JVM arguments: {exc}")
+            return
+        self.launch_button.setEnabled(False)
+        self.launch_status.setText("Checking installation, assets and Java runtime...")
+        self.log(f"Preparing launch for Minecraft {self.selected_version}.")
+        self.launch_worker = LaunchCheckWorker(
+            self.selected_version, entry, self.java_path.text().strip(),
+            int(self.ram.currentText()), extra_jvm,
+            self.account_source.currentText(), self.player_name.text().strip(), self,
+        )
+        self.launch_worker.ready.connect(self._launch_plan_ready)
+        self.launch_worker.failed.connect(self._launch_plan_failed)
+        self.launch_worker.finished.connect(self._launch_check_finished)
+        self.launch_worker.start()
+
+    def _launch_check_finished(self):
+        self.launch_worker = None
+        if not (self.minecraft_process and self.minecraft_process.state() != QProcess.ProcessState.NotRunning):
+            self.launch_button.setEnabled(True)
+
+    def _launch_plan_failed(self, error):
+        self.launch_status.setText(f"Launch blocked: {error}")
+        self.log(f"Launch preflight failed: {error}")
+        self.launch_button.setEnabled(True)
+
+    def _launch_plan_ready(self, plan):
+        self.log("All required files passed preflight checks. Starting Java process.")
+        self.launch_status.setText("Starting Minecraft...")
+        process = QProcess(self)
+        self.minecraft_process = process
+        process.setProgram(plan["argv"][0])
+        process.setArguments(plan["argv"][1:])
+        process.setWorkingDirectory(plan["cwd"])
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+        process.readyReadStandardOutput.connect(self._minecraft_stdout)
+        process.readyReadStandardError.connect(self._minecraft_stderr)
+        process.errorOccurred.connect(self._minecraft_process_error)
+        process.finished.connect(self._minecraft_process_finished)
+        process.started.connect(self._minecraft_process_started)
+        self.launch_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        process.start()
+
+    def _minecraft_process_started(self):
+        self.launch_status.setText("Minecraft process is running.")
+        self.log("Minecraft Java process started.")
+
+    def _minecraft_stdout(self):
+        if not self.minecraft_process:
+            return
+        data = bytes(self.minecraft_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in data.splitlines():
+            self.log(f"[MC] {line}")
+
+    def _minecraft_stderr(self):
+        if not self.minecraft_process:
+            return
+        data = bytes(self.minecraft_process.readAllStandardError()).decode("utf-8", errors="replace")
+        for line in data.splitlines():
+            self.log(f"[MC:ERR] {line}")
+
+    def _minecraft_process_error(self, error):
+        if not self.minecraft_process:
+            return
+        self.launch_status.setText(f"Minecraft process error: {self.minecraft_process.errorString()}")
+        self.log(f"Java process error: {self.minecraft_process.errorString()}")
+        if self.minecraft_process.state() == QProcess.ProcessState.NotRunning:
+            self.stop_button.setEnabled(False)
+            self.launch_button.setEnabled(True)
+
+    def _minecraft_process_finished(self, exit_code, exit_status):
+        self._minecraft_stdout()
+        self._minecraft_stderr()
+        self.stop_button.setEnabled(False)
+        self.launch_button.setEnabled(True)
+        self.launch_status.setText(f"Minecraft exited with code {exit_code}.")
+        self.log(f"Minecraft process finished: exit code {exit_code}, status {exit_status}.")
+        self.minecraft_process = None
+
+    def stop_minecraft(self):
+        process = self.minecraft_process
+        if not process or process.state() == QProcess.ProcessState.NotRunning:
+            return
+        self.log("Sending terminate signal to Minecraft.")
+        process.terminate()
+        if not process.waitForFinished(3000):
+            self.log("Minecraft did not stop gracefully; sending kill signal.")
+            process.kill()
 
     def _console_page(self):
         page = QWidget()
