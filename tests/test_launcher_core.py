@@ -18,7 +18,7 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            _fetch_temurin_asset, install_temurin_runtime,
                            search_modrinth_mods, fetch_modrinth_compatible_version,
                            download_verified_modrinth_file, list_installed_mods,
-                           remove_installed_mod, fetch_fabric_loader_versions,
+                           remove_installed_mod, fetch_fabric_loader_versions, fetch_forge_loader_versions,
                            install_fabric_loader, merge_fabric_profile_metadata)
 
 
@@ -932,6 +932,65 @@ class FabricLoaderTests(unittest.TestCase):
                      "libraries": [{"name": "net.fabricmc:fabric-loader:0.16.10"}]},
                     Path(directory),
                 )
+
+
+
+
+class ForgeLoaderCatalogTests(unittest.TestCase):
+    class JsonResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self, _size=-1):
+            return self.payload
+
+    class JsonOpener:
+        def __init__(self, payload):
+            self.payload = payload
+            self.url = None
+
+        def open(self, request, timeout=0):
+            self.url = request.full_url
+            return ForgeLoaderCatalogTests.JsonResponse(self.payload)
+
+    def test_returns_recommended_before_latest_for_selected_game(self):
+        payload = json.dumps({"promos": {
+            "1.20.1-latest": "47.4.0",
+            "1.20.1-recommended": "47.3.0",
+            "1.21.1-latest": "52.0.1",
+            "1.20.1-other": "47.2.0",
+        }}).encode()
+        opener = self.JsonOpener(payload)
+        builds = fetch_forge_loader_versions("1.20.1", opener=opener)
+        self.assertEqual(builds, [
+            {"version": "47.3.0", "channel": "Recommended"},
+            {"version": "47.4.0", "channel": "Latest"},
+        ])
+        self.assertEqual(opener.url,
+                         "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json")
+
+    def test_rejects_invalid_game_version_before_network(self):
+        with self.assertRaisesRegex(ValueError, "concrete Minecraft"):
+            fetch_forge_loader_versions("../latest")
+
+    def test_rejects_unsafe_or_wrong_version_promotion(self):
+        opener = self.JsonOpener(json.dumps({"promos": {
+            "1.20.1-latest": "../malicious",
+            "1.20.1-recommended": "1.21.1-52.0.1",
+        }}).encode())
+        with self.assertRaisesRegex(ValueError, "no published"):
+            fetch_forge_loader_versions("1.20.1", opener=opener)
+
+    def test_rejects_malformed_promotions_document(self):
+        opener = self.JsonOpener(json.dumps({"promos": []}).encode())
+        with self.assertRaisesRegex(ValueError, "promotions map"):
+            fetch_forge_loader_versions("1.20.1", opener=opener)
 
 
 class InstalledModManagementTests(unittest.TestCase):
