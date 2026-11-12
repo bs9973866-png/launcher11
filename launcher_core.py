@@ -1596,7 +1596,7 @@ def _download_mrpack_file(item, destination, opener=None, progress_callback=None
 
 def install_modrinth_mrpack(archive_path, voidex_root, java_executable="",
                             progress_callback=None, opener=None, runner=None,
-                            instance_directory=None):
+                            instance_directory=None, instance_game_version=None):
     """Validate and import a Modrinth .mrpack into the default or supplied instance."""
     archive = Path(archive_path).expanduser()
     if archive.is_symlink() or not archive.is_file() or archive.stat().st_size > 100 * 1024 * 1024:
@@ -1726,6 +1726,10 @@ def install_modrinth_mrpack(archive_path, voidex_root, java_executable="",
             instance.mkdir(parents=True, exist_ok=True)
             instance_root = instance.resolve()
         else:
+            if instance_game_version != game_version:
+                raise ValueError(
+                    f"Selected instance uses Minecraft {instance_game_version}, but this modpack requires {game_version}."
+                )
             instance = Path(instance_directory).expanduser()
             if not instance.is_absolute():
                 raise ValueError("Named instance destination must be an absolute path.")
