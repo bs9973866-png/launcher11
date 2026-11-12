@@ -13,7 +13,8 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             download_verified_version_json, resolve_library_artifacts,
                             download_verified_libraries, resolve_asset_objects, extract_native_archives,
                             discover_java_candidates, validate_java_executable,
-                            build_launch_plan, verify_cached_asset_objects)
+                            build_launch_plan, verify_cached_asset_objects,
+                            install_temurin_runtime)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -387,6 +388,27 @@ class JavaCheckWorker(QThread):
             self.failed.emit(str(exc))
 
 
+
+
+class TemurinInstallWorker(QThread):
+    progress = Signal(int, int, str)
+    completed = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, expected_major, destination, parent=None):
+        super().__init__(parent)
+        self.expected_major = expected_major
+        self.destination = Path(destination)
+
+    def run(self):
+        try:
+            path = install_temurin_runtime(
+                self.expected_major, self.destination,
+                progress_callback=lambda done, total, stage: self.progress.emit(done, total, stage),
+            )
+            self.completed.emit(path)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class LaunchCheckWorker(QThread):
@@ -1251,8 +1273,11 @@ class MainWindow(QMainWindow):
         self.detect_java_button.clicked.connect(self.detect_java)
         self.validate_java_button = QPushButton("Validate path")
         self.validate_java_button.clicked.connect(self.validate_selected_java)
+        self.install_java_button = QPushButton("Install required Java")
+        self.install_java_button.clicked.connect(self.install_required_java)
         java_actions.addWidget(self.detect_java_button)
         java_actions.addWidget(self.validate_java_button)
+        java_actions.addWidget(self.install_java_button)
         form.addLayout(self._form_row("Java executable", self.java_path))
         form.addRow("", java_actions)
         form.addRow("", self.java_status)
@@ -1291,6 +1316,53 @@ class MainWindow(QMainWindow):
             self.java_status.setText("Enter the full path to java.exe or use Detect Java.")
             return
         self._start_java_check(executable)
+
+    def install_required_java(self):
+        if self.java_install_worker and self.java_install_worker.isRunning():
+            return
+        expected_major = self._required_java_major()
+        if expected_major is None:
+            self.java_status.setText("Inspect a Minecraft version first to determine its Java requirement.")
+            return
+        if self.java_worker and self.java_worker.isRunning():
+            self.java_status.setText("Wait for Java detection to finish first.")
+            return
+        self.install_java_button.setEnabled(False)
+        self.detect_java_button.setEnabled(False)
+        self.validate_java_button.setEnabled(False)
+        self.java_status.setText(f"Preparing official Eclipse Temurin Java {expected_major}...")
+        self.log(f"Starting explicit Temurin Java {expected_major} installation.")
+        runtime_root = Path.home() / ".voidex" / "runtimes"
+        self.java_install_worker = TemurinInstallWorker(expected_major, runtime_root, self)
+        self.java_install_worker.progress.connect(self._java_install_progress)
+        self.java_install_worker.completed.connect(self._java_install_completed)
+        self.java_install_worker.failed.connect(self._java_install_failed)
+        self.java_install_worker.finished.connect(self._java_install_finished)
+        self.java_install_worker.start()
+
+    def _java_install_progress(self, completed, total, stage):
+        if total:
+            self.java_status.setText(
+                f"{stage}: {completed / (1024 * 1024):.1f} / {total / (1024 * 1024):.1f} MiB"
+            )
+        else:
+            self.java_status.setText(f"Preparing {stage}...")
+
+    def _java_install_completed(self, executable):
+        self.java_path.setText(executable)
+        self.settings.setValue("java_path", executable)
+        self.java_status.setText(f"Java runtime installed and verified: {executable}")
+        self.log(f"Temurin runtime installed and verified: {executable}")
+
+    def _java_install_failed(self, error):
+        self.java_status.setText(f"Java installation failed: {error}")
+        self.log(f"Temurin installation error: {error}")
+
+    def _java_install_finished(self):
+        self.install_java_button.setEnabled(True)
+        self.detect_java_button.setEnabled(True)
+        self.validate_java_button.setEnabled(True)
+        self.java_install_worker = None
 
     def _start_java_check(self, executable):
         self.detect_java_button.setEnabled(False)
