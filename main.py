@@ -18,7 +18,8 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod,
                             fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata,
                             fetch_forge_loader_versions, install_forge_loader, merge_forge_profile_metadata,
-                            fetch_neoforge_loader_versions, install_neoforge_loader, merge_neoforge_profile_metadata)
+                            fetch_neoforge_loader_versions, install_neoforge_loader, merge_neoforge_profile_metadata,
+                            fetch_quilt_loader_versions, install_quilt_loader)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -215,6 +216,44 @@ class FabricInstallWorker(QThread):
     def run(self):
         try:
             result = install_fabric_loader(
+                self.game_version, self.loader_version, self.java_executable,
+                self.voidex_root, progress_callback=self.stage.emit,
+            )
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class QuiltVersionsWorker(QThread):
+    loaded = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, game_version, parent=None):
+        super().__init__(parent)
+        self.game_version = game_version
+
+    def run(self):
+        try:
+            self.loaded.emit(fetch_quilt_loader_versions(self.game_version))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class QuiltInstallWorker(QThread):
+    stage = Signal(str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, game_version, loader_version, java_executable, voidex_root, parent=None):
+        super().__init__(parent)
+        self.game_version = game_version
+        self.loader_version = loader_version
+        self.java_executable = java_executable
+        self.voidex_root = voidex_root
+
+    def run(self):
+        try:
+            result = install_quilt_loader(
                 self.game_version, self.loader_version, self.java_executable,
                 self.voidex_root, progress_callback=self.stage.emit,
             )
@@ -755,6 +794,10 @@ class MainWindow(QMainWindow):
         self.forge_install_worker = None
         self.neoforge_versions_worker = None
         self.neoforge_install_worker = None
+        self.quilt_versions_worker = None
+        self.quilt_install_worker = None
+        self.quilt_profile_id = self.settings.value("quilt_profile_id", "")
+        self.quilt_profile_game_version = self.settings.value("quilt_profile_game_version", "")
         self.neoforge_profile_id = self.settings.value("neoforge_profile_id", "")
         self.neoforge_profile_game_version = self.settings.value("neoforge_profile_game_version", "")
         self.forge_profile_id = self.settings.value("forge_profile_id", "")
@@ -974,6 +1017,24 @@ class MainWindow(QMainWindow):
         neoforge_row.addWidget(self.neoforge_install_button)
         layout.addLayout(neoforge_row)
         layout.addWidget(self.neoforge_status)
+
+        quilt_row = QHBoxLayout()
+        self.quilt_loader_version = QComboBox()
+        self.quilt_loader_version.setMinimumWidth(150)
+        self.quilt_versions_button = QPushButton("Load Quilt builds")
+        self.quilt_versions_button.clicked.connect(self.load_quilt_versions)
+        self.quilt_install_button = QPushButton("Install Quilt")
+        self.quilt_install_button.clicked.connect(self.install_selected_quilt)
+        self.quilt_status = QLabel("Quilt loader can be installed with the official installer.")
+        self.quilt_status.setObjectName("Muted")
+        self.quilt_status.setWordWrap(True)
+        quilt_row.addWidget(QLabel("Quilt build"))
+        quilt_row.addWidget(self.quilt_loader_version)
+        quilt_row.addWidget(self.quilt_versions_button)
+        quilt_row.addWidget(self.quilt_install_button)
+        layout.addLayout(quilt_row)
+        layout.addWidget(self.quilt_status)
+
         self.modrinth_search_button = QPushButton("Search Modrinth")
         self.modrinth_search_button.clicked.connect(self.search_modrinth)
         controls.addWidget(self.modrinth_search, 2)
@@ -1023,7 +1084,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.installed_mods_table, 1)
 
         warning = QLabel(
-            "Fabric and Forge installation are supported. NeoForge can be installed from its official Maven repository; its launch-profile integration is the next step. "
+            "Fabric, Forge and NeoForge installation and launch integration are supported. Quilt can be installed from the official Quilt Meta catalog; launch integration is the next step. "
             "Mods must match the selected Minecraft version and installed loader."
         )
         warning.setObjectName("Muted")
@@ -1091,6 +1152,90 @@ class MainWindow(QMainWindow):
     def _forge_versions_finished(self):
         self.forge_versions_button.setEnabled(True)
         self.forge_versions_worker = None
+
+
+    def load_quilt_versions(self):
+        if self.quilt_versions_worker and self.quilt_versions_worker.isRunning():
+            return
+        game_version = self.modrinth_game_version.text().strip()
+        self.quilt_versions_button.setEnabled(False)
+        self.quilt_status.setText(f"Loading official Quilt builds for Minecraft {game_version}...")
+        self.quilt_versions_worker = QuiltVersionsWorker(game_version, self)
+        self.quilt_versions_worker.loaded.connect(self._quilt_versions_loaded)
+        self.quilt_versions_worker.failed.connect(self._quilt_versions_failed)
+        self.quilt_versions_worker.finished.connect(self._quilt_versions_finished)
+        self.quilt_versions_worker.start()
+
+    def _quilt_versions_loaded(self, versions):
+        self.quilt_loader_version.clear()
+        for item in versions:
+            label = item["version"] + ("" if item["stable"] else " (unstable)")
+            self.quilt_loader_version.addItem(label, item["version"])
+        self.quilt_status.setText(
+            f"Found {len(versions)} official Quilt build(s), stable builds first."
+        )
+
+    def _quilt_versions_failed(self, error):
+        self.quilt_status.setText(f"Quilt catalog lookup failed: {error}")
+        self.log(f"Quilt catalog lookup failed: {error}")
+
+    def _quilt_versions_finished(self):
+        self.quilt_versions_button.setEnabled(True)
+        self.quilt_versions_worker = None
+
+    def install_selected_quilt(self):
+        if self.quilt_install_worker and self.quilt_install_worker.isRunning():
+            return
+        game_version = self.modrinth_game_version.text().strip()
+        loader_version = self.quilt_loader_version.currentData()
+        java_executable = self.java_path.text().strip()
+        if not loader_version:
+            self.quilt_status.setText("Load and select a Quilt build first.")
+            return
+        if not java_executable:
+            self.quilt_status.setText("Set a Java executable in Settings before installing Quilt.")
+            self._navigate(4)
+            return
+        if game_version != self.selected_version:
+            QMessageBox.information(
+                self, "VOIDEX",
+                "The Mods page version must match the selected Minecraft version. Select it on the Versions page first."
+            )
+            return
+        self.quilt_install_button.setEnabled(False)
+        self.quilt_versions_button.setEnabled(False)
+        self.quilt_status.setText("Preparing official Quilt installer...")
+        self.quilt_install_worker = QuiltInstallWorker(
+            game_version, loader_version, java_executable, Path.home() / ".voidex", self
+        )
+        self.quilt_install_worker.stage.connect(self._quilt_install_stage)
+        self.quilt_install_worker.completed.connect(self._quilt_install_completed)
+        self.quilt_install_worker.failed.connect(self._quilt_install_failed)
+        self.quilt_install_worker.finished.connect(self._quilt_install_finished)
+        self.quilt_install_worker.start()
+        self.log(f"Installing Quilt {loader_version} for Minecraft {game_version}.")
+
+    def _quilt_install_stage(self, stage):
+        self.quilt_status.setText(stage)
+
+    def _quilt_install_completed(self, result):
+        self.quilt_profile_id = result["profile_id"]
+        self.quilt_profile_game_version = result["game_version"]
+        self.settings.setValue("quilt_profile_id", self.quilt_profile_id)
+        self.settings.setValue("quilt_profile_game_version", self.quilt_profile_game_version)
+        self.quilt_status.setText(
+            f"Quilt profile installed: {self.quilt_profile_id}. Launch integration is next."
+        )
+        self.log(f"Quilt profile installed and validated: {self.quilt_profile_id}")
+
+    def _quilt_install_failed(self, error):
+        self.quilt_status.setText(f"Quilt installation failed: {error}")
+        self.log(f"Quilt installation failed: {error}")
+
+    def _quilt_install_finished(self):
+        self.quilt_install_button.setEnabled(True)
+        self.quilt_versions_button.setEnabled(True)
+        self.quilt_install_worker = None
 
 
     def load_neoforge_versions(self):
