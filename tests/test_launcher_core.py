@@ -21,7 +21,7 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            download_verified_modrinth_file, list_installed_mods,
                            remove_installed_mod, fetch_fabric_loader_versions, fetch_forge_loader_versions, _download_forge_installer,
                            install_fabric_loader, merge_fabric_profile_metadata, merge_forge_profile_metadata,
-                           fetch_neoforge_loader_versions, _download_neoforge_installer, merge_neoforge_profile_metadata)
+                           fetch_neoforge_loader_versions, _download_neoforge_installer, merge_neoforge_profile_metadata, fetch_quilt_loader_versions, fetch_quilt_installer_versions, _download_quilt_installer, install_quilt_loader, merge_quilt_profile_metadata)
 
 
 def sample_metadata():
@@ -1206,6 +1206,143 @@ class NeoForgeProfileMergeTests(unittest.TestCase):
                              "size": len(b"changed"),
                          }},
                      }]}, root,
+                )
+
+
+class QuiltCatalogTests(unittest.TestCase):
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+        def read(self, _size=-1):
+            return self.payload
+
+    class Opener:
+        def __init__(self, payload):
+            self.payload = payload
+            self.urls = []
+        def open(self, request, timeout=0):
+            self.urls.append(request.full_url)
+            return QuiltCatalogTests.Response(self.payload)
+
+    def test_filters_loader_builds_and_sorts_stable_first(self):
+        payload = json.dumps([
+            {"loader": {"version": "0.30.0-beta.1", "stable": False}},
+            {"loader": {"version": "0.29.2", "stable": True}},
+            {"loader": {"version": "0.29.1", "stable": True}},
+        ]).encode()
+        opener = self.Opener(payload)
+        builds = fetch_quilt_loader_versions("1.21.1", opener=opener)
+        self.assertEqual(builds, [
+            {"version": "0.29.2", "stable": True},
+            {"version": "0.29.1", "stable": True},
+            {"version": "0.30.0-beta.1", "stable": False},
+        ])
+        self.assertEqual(opener.urls[0], "https://meta.quiltmc.org/v3/versions/loader/1.21.1")
+
+    def test_rejects_invalid_game_version_before_network(self):
+        opener = Mock()
+        with self.assertRaisesRegex(ValueError, "concrete Minecraft"):
+            fetch_quilt_loader_versions("../latest", opener=opener)
+        opener.open.assert_not_called()
+
+    def test_reads_stable_installer_catalog(self):
+        opener = self.Opener(json.dumps([
+            {"version": "0.12.2-beta.1", "stable": False},
+            {"version": "0.12.1", "stable": True},
+        ]).encode())
+        self.assertEqual(fetch_quilt_installer_versions(opener=opener), [
+            {"version": "0.12.1", "stable": True},
+            {"version": "0.12.2-beta.1", "stable": False},
+        ])
+
+
+class QuiltInstallerDownloadTests(unittest.TestCase):
+    def test_downloads_and_verifies_quilt_installer(self):
+        payload = b"quilt-installer-test"
+        opener = Mock()
+        opener.open.side_effect = [
+            io.BytesIO(hashlib.sha1(payload).hexdigest().encode()),
+            io.BytesIO(payload),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = _download_quilt_installer("0.12.1", directory, opener=opener)
+            self.assertEqual(path.name, "quilt-installer-0.12.1.jar")
+            self.assertEqual(path.read_bytes(), payload)
+
+    def test_rejects_checksum_mismatch_and_cleans_partial_file(self):
+        opener = Mock()
+        opener.open.side_effect = [io.BytesIO(b"0" * 40), io.BytesIO(b"bad")]
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "SHA-1 verification"):
+                _download_quilt_installer("0.12.1", directory, opener=opener)
+            self.assertEqual(list(Path(directory).glob("*.part")), [])
+
+    def test_rejects_invalid_version_before_network(self):
+        opener = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "version is invalid"):
+                _download_quilt_installer("../bad", directory, opener=opener)
+        opener.open.assert_not_called()
+
+
+class QuiltProfileMergeTests(unittest.TestCase):
+    def test_merges_quilt_profile_and_checks_local_library(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            relative = Path("org/quiltmc/quilt-loader/0.29.2/quilt-loader-0.29.2.jar")
+            target = root / relative
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"quilt-loader")
+            base = {"id": "1.21.1", "libraries": [],
+                    "arguments": {"jvm": ["-Dvanilla=true"], "game": ["--demo"]}}
+            profile = {
+                "id": "quilt-loader-0.29.2-1.21.1", "inheritsFrom": "1.21.1",
+                "mainClass": "org.quiltmc.loader.impl.launch.knot.KnotClient",
+                "libraries": [{"name": "org.quiltmc:quilt-loader:0.29.2",
+                               "url": "https://maven.quiltmc.org/repository/release/"}],
+                "arguments": {"jvm": ["-Dquilt=true"], "game": ["--quilt"]},
+            }
+            merged = merge_quilt_profile_metadata(base, profile, root)
+            self.assertEqual(merged["mainClass"], profile["mainClass"])
+            self.assertEqual(merged["arguments"]["jvm"], ["-Dvanilla=true", "-Dquilt=true"])
+            self.assertEqual(merged["libraries"][0]["downloads"]["artifact"]["path"], relative.as_posix())
+
+    def test_rejects_wrong_game_inheritance(self):
+        with self.assertRaisesRegex(ValueError, "does not inherit"):
+            merge_quilt_profile_metadata(
+                {"id": "1.21.1", "libraries": []},
+                {"id": "quilt-loader-0.29.2-1.21.1", "inheritsFrom": "1.20.4",
+                 "mainClass": "example.Main", "libraries": []}, Path("."),
+            )
+
+    def test_rejects_missing_quilt_library(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "library is missing"):
+                merge_quilt_profile_metadata(
+                    {"id": "1.21.1", "libraries": []},
+                    {"id": "quilt-loader-0.29.2-1.21.1", "inheritsFrom": "1.21.1",
+                     "mainClass": "example.Main",
+                     "libraries": [{"name": "org.quiltmc:quilt-loader:0.29.2"}]},
+                    Path(directory),
+                )
+
+    def test_rejects_untrusted_quilt_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "org/example/demo/1.0/demo-1.0.jar"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"demo")
+            with self.assertRaisesRegex(ValueError, "repository is not trusted"):
+                merge_quilt_profile_metadata(
+                    {"id": "1.21.1", "libraries": []},
+                    {"id": "quilt-loader-0.29.2-1.21.1", "inheritsFrom": "1.21.1",
+                     "mainClass": "example.Main",
+                     "libraries": [{"name": "org.example:demo:1.0",
+                                    "url": "https://evil.example/"}]}, root,
                 )
 
 
