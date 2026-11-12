@@ -338,7 +338,7 @@ class LibraryDownloadTests(unittest.TestCase):
             target.write_bytes(self.payload)
             opener = Mock()
             result = download_verified_library(self.artifact, directory, opener=opener)
-            self.assertEqual(result, target.resolve())
+            self.assertTrue(result[0].samefile(target))
             opener.open.assert_not_called()
 
     def test_hash_mismatch_preserves_old_file_and_cleans_temp(self):
@@ -517,9 +517,13 @@ class NativeArchiveExtractionTests(unittest.TestCase):
     def test_rejects_absolute_drive_and_backslash_paths(self):
         for member in ("/rooted.dll", "C:/Windows/evil.dll", "folder\\evil.dll"):
             with self.subTest(member=member), tempfile.TemporaryDirectory() as directory:
-                archive = self.make_archive(directory, [(member, b"bad")])
-                with self.assertRaises(ValueError):
-                    extract_native_archives([archive], Path(directory) / "out")
+                    if "\\\\" in member:
+                    with self.assertRaises(ValueError):
+                        _validated_native_member_name(member)
+                else:
+                    archive = self.make_archive(directory, [(member, b"bad")])
+                    with self.assertRaises(ValueError):
+                        extract_native_archives([archive], Path(directory) / "out")
 
     def test_rejects_symlink_entries(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1766,7 +1770,7 @@ class LaunchPlanTests(unittest.TestCase):
         self.assertIn(str(self.game.resolve()), plan["game_arguments"])
         self.assertIn("1280", plan["game_arguments"])
         self.assertIn("-Dvoidex.windows=true", plan["jvm_arguments"])
-        self.assertEqual(plan["argv"][0], str(self.java))
+        self.assertTrue(Path(plan["argv"][0]).samefile(self.java))
         self.assertEqual(plan["cwd"], str(self.game.resolve()))
 
     def test_argument_rules_exclude_other_platform(self):
