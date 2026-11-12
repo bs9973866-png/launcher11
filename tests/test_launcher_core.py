@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from launcher_core import download_verified_client, summarize_version_metadata
+from launcher_core import download_verified_client, download_verified_version_json, summarize_version_metadata
 
 
 def sample_metadata():
@@ -137,6 +137,65 @@ class ClientDownloadTests(unittest.TestCase):
             opener.open.return_value = FakeResponse(self.payload)
             with self.assertRaisesRegex(ValueError, "Incomplete"):
                 download_verified_client(bad, Path(directory) / "client.jar", opener=opener)
+
+
+class VersionJsonCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.payload = b'{"id":"1.21.4","libraries":[]}'
+        self.url = "https://piston-meta.mojang.com/v1/packages/example/1.21.4.json"
+        self.sha1 = hashlib.sha1(self.payload).hexdigest()
+
+    def test_downloads_and_verifies_version_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            opener = Mock()
+            opener.open.return_value = FakeResponse(self.payload)
+            target = Path(directory) / "1.21.4.json"
+            result = download_verified_version_json(self.url, self.sha1, target, opener=opener)
+            self.assertEqual(result, target)
+            self.assertEqual(target.read_bytes(), self.payload)
+
+    def test_reuses_valid_cached_json_without_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "version.json"
+            target.write_bytes(self.payload)
+            opener = Mock()
+            download_verified_version_json(self.url, self.sha1, target, opener=opener)
+            opener.open.assert_not_called()
+
+    def test_rejects_bad_hash_and_preserves_existing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "version.json"
+            target.write_bytes(b"old valid content")
+            opener = Mock()
+            opener.open.return_value = FakeResponse(self.payload)
+            with self.assertRaisesRegex(ValueError, "SHA-1"):
+                download_verified_version_json(self.url, "0" * 40, target, opener=opener)
+            self.assertEqual(target.read_bytes(), b"old valid content")
+            self.assertEqual(list(Path(directory).glob("*.part")), [])
+
+    def test_rejects_untrusted_metadata_host_before_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            opener = Mock()
+            with self.assertRaisesRegex(ValueError, "metadata host"):
+                download_verified_version_json(
+                    "https://example.com/version.json", self.sha1,
+                    Path(directory) / "version.json", opener=opener
+                )
+            opener.open.assert_not_called()
+
+    def test_rejects_invalid_json_without_replacing_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "version.json"
+            target.write_bytes(b"previous")
+            invalid = b"not json"
+            opener = Mock()
+            opener.open.return_value = FakeResponse(invalid)
+            with self.assertRaisesRegex(ValueError, "valid UTF-8 JSON"):
+                download_verified_version_json(
+                    self.url, hashlib.sha1(invalid).hexdigest(), target, opener=opener
+                )
+            self.assertEqual(target.read_bytes(), b"previous")
+            self.assertEqual(list(Path(directory).glob("*.part")), [])
 
 
 if __name__ == "__main__":
