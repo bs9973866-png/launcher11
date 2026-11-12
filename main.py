@@ -16,7 +16,8 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             build_launch_plan, verify_cached_asset_objects,
                             install_temurin_runtime, search_modrinth_mods,
                             fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod,
-                            fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata)
+                            fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata,
+                            fetch_forge_loader_versions)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -116,6 +117,22 @@ class FabricVersionsWorker(QThread):
     def run(self):
         try:
             self.loaded.emit(fetch_fabric_loader_versions(self.game_version))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+
+class ForgeVersionsWorker(QThread):
+    loaded = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, game_version, parent=None):
+        super().__init__(parent)
+        self.game_version = game_version
+
+    def run(self):
+        try:
+            self.loaded.emit(fetch_forge_loader_versions(self.game_version))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -643,6 +660,7 @@ class MainWindow(QMainWindow):
         self.launch_worker = None
         self.minecraft_process = None
         self.fabric_versions_worker = None
+        self.forge_versions_worker = None
         self.fabric_install_worker = None
         self.fabric_profile_id = self.settings.value("fabric_profile_id", "")
         self.fabric_profile_game_version = self.settings.value("fabric_profile_game_version", "")
@@ -873,7 +891,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.installed_mods_table, 1)
 
         warning = QLabel(
-            "Fabric installation is supported here. Forge, NeoForge and Quilt installation are not available yet. "
+            "Fabric installation is supported; official Forge build discovery is available. Forge installation, NeoForge and Quilt are not available yet. "
             "Mods must match the selected Minecraft version and installed loader."
         )
         warning.setObjectName("Muted")
@@ -910,6 +928,37 @@ class MainWindow(QMainWindow):
     def _fabric_versions_finished(self):
         self.fabric_versions_button.setEnabled(True)
         self.fabric_versions_worker = None
+
+
+    def load_forge_versions(self):
+        if self.forge_versions_worker and self.forge_versions_worker.isRunning():
+            return
+        game_version = self.modrinth_game_version.text().strip()
+        self.forge_versions_button.setEnabled(False)
+        self.forge_status.setText(f"Loading official Forge builds for Minecraft {game_version}...")
+        self.forge_versions_worker = ForgeVersionsWorker(game_version, self)
+        self.forge_versions_worker.loaded.connect(self._forge_versions_loaded)
+        self.forge_versions_worker.failed.connect(self._forge_versions_failed)
+        self.forge_versions_worker.finished.connect(self._forge_versions_finished)
+        self.forge_versions_worker.start()
+
+    def _forge_versions_loaded(self, versions):
+        self.forge_loader_version.clear()
+        for item in versions:
+            self.forge_loader_version.addItem(
+                f"{item['version']} ({item['channel']})", item["version"]
+            )
+        self.forge_status.setText(
+            f"Found {len(versions)} official Forge build(s). Recommended builds are listed first."
+        )
+
+    def _forge_versions_failed(self, error):
+        self.forge_status.setText(f"Forge catalog lookup failed: {error}")
+        self.log(f"Forge catalog lookup failed: {error}")
+
+    def _forge_versions_finished(self):
+        self.forge_versions_button.setEnabled(True)
+        self.forge_versions_worker = None
 
     def install_selected_fabric(self):
         if self.fabric_install_worker and self.fabric_install_worker.isRunning():
