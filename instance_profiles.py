@@ -235,6 +235,16 @@ def set_instance_profile_loader_profile(root, profile_id, expected_game_version,
     if (not isinstance(loader_profile_id, str)
             or not re.fullmatch(r"[A-Za-z0-9_.+-]{1,160}", loader_profile_id)):
         raise ValueError("Installed loader profile ID is invalid.")
+    expected_prefixes = {
+        "fabric": ("fabric-loader-",),
+        "forge": (f"{expected_game_version}-forge-",),
+        "neoforge": (f"{expected_game_version}-neoforge-", "neoforge-"),
+        "quilt": ("quilt-loader-",),
+    }
+    if not any(loader_profile_id.startswith(prefix) for prefix in expected_prefixes[loader]):
+        raise ValueError("Installed loader profile ID does not match the selected loader.")
+    if loader == "quilt" and not loader_profile_id.endswith("-" + expected_game_version):
+        raise ValueError("Installed Quilt profile ID does not match the Minecraft version.")
     directory = _profile_directory(root_path, profile_id)
     metadata = directory / "profile.json"
     if not directory.is_dir() or metadata.is_symlink() or not metadata.is_file():
