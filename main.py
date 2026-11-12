@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal
 from PySide6.QtWidgets import (
@@ -42,7 +43,10 @@ MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 
 def offline_uuid(username: str) -> str:
     """Minecraft-compatible offline profile UUID (UUID v3 / MD5)."""
-    return str(uuid.uuid3(uuid.NAMESPACE_DNS, "OfflinePlayer:" + username))
+    digest = bytearray(hashlib.md5(("OfflinePlayer:" + username).encode("utf-8")).digest())
+    digest[6] = (digest[6] & 0x0F) | 0x30
+    digest[8] = (digest[8] & 0x3F) | 0x80
+    return str(uuid.UUID(bytes=bytes(digest)))
 
 
 class ManifestWorker(QThread):
@@ -74,7 +78,6 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 600)
         self._build_ui()
         self._restore_settings()
-        self._apply_profile(self.preset.currentText())
         self._refresh_identity()
         self.log("VOIDEX initialized. Background polling and idle animation timers are disabled.")
         self.log("Version catalog connects to Mojang only when you open Versions or press Refresh.")
