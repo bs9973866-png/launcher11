@@ -5,7 +5,7 @@ from pathlib import Path
 
 from instance_profiles import (
     create_instance_profile, delete_instance_profile, list_instance_profiles,
-    rename_instance_profile,
+    rename_instance_profile, update_instance_profile_loader,
 )
 
 
@@ -60,6 +60,32 @@ class InstanceProfileTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 rename_instance_profile(root, second["id"], "../outside")
             self.assertEqual(list_instance_profiles(root)[1]["name"], "Beta")
+
+    def test_loader_update_changes_only_matching_profile_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "profiles"
+            profile = create_instance_profile(root, "Pack", "1.21.8", "vanilla")
+            world = Path(profile["game_directory_path"]) / "saves" / "world.dat"
+            world.parent.mkdir()
+            world.write_bytes(b"world")
+
+            updated = update_instance_profile_loader(
+                root, profile["id"], "1.21.8", "fabric"
+            )
+
+            self.assertEqual(updated["loader"], "fabric")
+            self.assertEqual(list_instance_profiles(root)[0]["loader"], "fabric")
+            self.assertEqual(world.read_bytes(), b"world")
+
+    def test_loader_update_rejects_wrong_version_and_unknown_loader(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "profiles"
+            profile = create_instance_profile(root, "Pack", "1.21.8")
+            with self.assertRaisesRegex(ValueError, "version changed"):
+                update_instance_profile_loader(root, profile["id"], "1.20.1", "forge")
+            with self.assertRaisesRegex(ValueError, "Unsupported"):
+                update_instance_profile_loader(root, profile["id"], "1.21.8", "unknown")
+            self.assertEqual(list_instance_profiles(root)[0]["loader"], "vanilla")
 
     def test_delete_keeps_game_data_by_default(self):
         with tempfile.TemporaryDirectory() as temp:
