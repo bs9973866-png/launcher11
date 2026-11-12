@@ -1136,6 +1136,23 @@ class NeoForgeProfileMergeTests(unittest.TestCase):
             self.assertEqual(artifact["path"], relative.as_posix())
             self.assertEqual(artifact["sha1"], hashlib.sha1(b"neoforge-core").hexdigest())
 
+    def test_accepts_installer_style_neoforge_profile_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            relative = Path("net/neoforged/fmlcore/1.0/fmlcore-1.0.jar")
+            target = root / relative
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"neoforge-core")
+            merged = merge_neoforge_profile_metadata(
+                {"id": "1.21.1", "libraries": []},
+                {"id": "neoforge-21.1.172", "inheritsFrom": "1.21.1",
+                 "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+                 "libraries": [{"name": "net.neoforged:fmlcore:1.0",
+                                "url": "https://maven.neoforged.net/releases/"}]},
+                root,
+            )
+            self.assertEqual(merged["id"], "neoforge-21.1.172")
+
     def test_rejects_profile_for_another_minecraft_version(self):
         with self.assertRaisesRegex(ValueError, "does not inherit"):
             merge_neoforge_profile_metadata(
