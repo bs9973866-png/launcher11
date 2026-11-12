@@ -84,6 +84,16 @@ class MojangRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+class MojangMetadataRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep version metadata redirects on Mojang's metadata host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlparse(newurl)
+        if parsed.scheme != "https" or parsed.hostname not in VERSION_METADATA_HOSTS:
+            raise ValueError("Mojang metadata redirected to an untrusted host.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def download_verified_client(summary, destination, progress_callback=None, opener=None):
     """Stream a Mojang client JAR to a temp file; verify size/SHA-1 before atomic replace."""
     if not isinstance(summary, dict):
@@ -203,7 +213,7 @@ def download_verified_version_json(metadata_url, expected_sha1, destination,
         metadata_url, headers={"User-Agent": "VOIDEX-Launcher/0.4"}
     )
     if opener is None:
-        opener = urllib.request.build_opener(MojangRedirectHandler())
+        opener = urllib.request.build_opener(MojangMetadataRedirectHandler())
     temporary_path = None
     digest = hashlib.sha1()
     downloaded = 0
