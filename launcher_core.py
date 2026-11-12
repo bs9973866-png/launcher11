@@ -17,6 +17,7 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 import stat
 import zipfile
+import xml.etree.ElementTree as ET
 from urllib.parse import urlencode, urlparse, quote
 
 MANIFEST_HOST = "piston-meta.mojang.com"
@@ -2047,6 +2048,199 @@ def install_forge_loader(game_version, forge_version, java_executable, voidex_ro
         "profile_id": profile_id, "profile_path": str(profile_path),
         "output": (completed.stdout or "")[-2000:],
     }
+
+
+
+NEOFORGE_MAVEN_HOST = "maven.neoforged.net"
+NEOFORGE_METADATA_URL = f"https://{NEOFORGE_MAVEN_HOST}/releases/net/neoforged/neoforge/maven-metadata.xml"
+_NEOFORGE_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){2,4}(?:-[A-Za-z0-9_.+-]+)?$")
+MAX_NEOFORGE_INSTALLER_BYTES = 150 * 1024 * 1024
+
+
+def _neoforge_version_prefix(game_version):
+    if not isinstance(game_version, str) or not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", game_version):
+        raise ValueError("Choose a concrete Minecraft release for NeoForge.")
+    parts = game_version.split(".")
+    if parts[0] == "1":
+        if len(parts) == 2:
+            return f"{parts[1]}.0."
+        return f"{parts[1]}.{parts[2]}."
+    return game_version + "."
+
+
+def fetch_neoforge_loader_versions(game_version, opener=None):
+    """Read NeoForge's official Maven metadata and return builds for a Minecraft release."""
+    prefix = _neoforge_version_prefix(game_version)
+    if game_version == "1.20.1":
+        raise ValueError("NeoForge does not publish its modern loader line for Minecraft 1.20.1; use Forge.")
+    request = urllib.request.Request(
+        NEOFORGE_METADATA_URL, headers={"User-Agent": "VOIDEX-Launcher/0.9"}
+    )
+    opener = opener or urllib.request.build_opener(
+        SameHostLibraryRedirectHandler(NEOFORGE_MAVEN_HOST)
+    )
+    with opener.open(request, timeout=25) as response:
+        raw = response.read(4 * 1024 * 1024 + 1)
+    if len(raw) > 4 * 1024 * 1024:
+        raise ValueError("NeoForge Maven metadata is too large.")
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise ValueError("NeoForge returned invalid Maven metadata XML.") from exc
+    versions_node = root.find("./versioning/versions")
+    if versions_node is None:
+        raise ValueError("NeoForge Maven metadata has no version list.")
+    versions = []
+    seen = set()
+    for node in versions_node.findall("version"):
+        value = (node.text or "").strip()
+        if not _NEOFORGE_VERSION_RE.fullmatch(value) or not value.startswith(prefix) or value in seen:
+            continue
+        seen.add(value)
+        versions.append(value)
+    def version_key(value):
+        numeric = value.split("-", 1)[0]
+        return tuple(int(part) for part in numeric.split(".")), "-" not in value
+    versions.sort(key=version_key, reverse=True)
+    if not versions:
+        raise ValueError(f"NeoForge has no published builds for Minecraft {game_version}.")
+    return [{"version": value, "channel": "Release" if "-" not in value else "Beta"}
+            for value in versions[:100]]
+
+
+def _download_neoforge_installer(version, destination, opener=None, progress_callback=None):
+    if not isinstance(version, str) or not _NEOFORGE_VERSION_RE.fullmatch(version):
+        raise ValueError("NeoForge installer version is invalid.")
+    root = Path(destination).expanduser()
+    if root.is_symlink():
+        raise ValueError("NeoForge installer cache must not be a symbolic link.")
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    filename = f"neoforge-{version}-installer.jar"
+    url = f"https://{NEOFORGE_MAVEN_HOST}/releases/net/neoforged/neoforge/{version}/{filename}"
+    opener = opener or urllib.request.build_opener(SameHostLibraryRedirectHandler(NEOFORGE_MAVEN_HOST))
+    headers = {"User-Agent": "VOIDEX-Launcher/0.9"}
+    checksum_request = urllib.request.Request(url + ".sha256", headers=headers)
+    with opener.open(checksum_request, timeout=25) as response:
+        checksum_text = response.read(256).decode("ascii", errors="strict").strip().split()[0]
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", checksum_text):
+        raise ValueError("NeoForge installer SHA-256 metadata is invalid.")
+    target = root / filename
+    if target.is_symlink():
+        raise ValueError("Refusing to overwrite a symbolic-link NeoForge installer.")
+
+    def valid(path):
+        if not path.is_file() or not 0 < path.stat().st_size <= MAX_NEOFORGE_INSTALLER_BYTES:
+            return False
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == checksum_text.lower()
+
+    if valid(target):
+        if progress_callback:
+            progress_callback(target.stat().st_size, target.stat().st_size)
+        return target
+    temporary = None
+    digest = hashlib.sha256()
+    received = 0
+    try:
+        request = urllib.request.Request(url, headers=headers)
+        with opener.open(request, timeout=45) as response:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=filename + ".", suffix=".part",
+                dir=str(root), delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                while True:
+                    chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    received += len(chunk)
+                    if received > MAX_NEOFORGE_INSTALLER_BYTES:
+                        raise ValueError("NeoForge installer exceeds the allowed download size.")
+                    stream.write(chunk)
+                    digest.update(chunk)
+                    if progress_callback:
+                        progress_callback(received, 0)
+        if received == 0 or digest.hexdigest() != checksum_text.lower():
+            raise ValueError("NeoForge installer SHA-256 verification failed.")
+        os.replace(temporary, target)
+        temporary = None
+        return target
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def install_neoforge_loader(game_version, neoforge_version, java_executable, voidex_root,
+                            progress_callback=None, opener=None, runner=None):
+    """Install the official NeoForge client profile and validate its generated metadata."""
+    builds = fetch_neoforge_loader_versions(game_version, opener=opener)
+    if neoforge_version not in {item["version"] for item in builds}:
+        raise ValueError("The selected NeoForge build is not available for this Minecraft version.")
+    java = Path(java_executable).expanduser()
+    if java.is_symlink() or not java.is_file():
+        raise ValueError("Select a valid Java executable before installing NeoForge.")
+    java_validation = validate_java_executable(java)
+    java = Path(java_validation["path"])
+    root = Path(voidex_root).expanduser()
+    if root.is_symlink():
+        raise ValueError("VOIDEX data directory must not be a symbolic link.")
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    if progress_callback:
+        progress_callback("Downloading official NeoForge installer")
+    installer = _download_neoforge_installer(
+        neoforge_version, root / "cache" / "installers", opener=opener
+    )
+    if progress_callback:
+        progress_callback("Installing NeoForge client profile")
+    command = [str(java.resolve()), "-jar", str(installer), "--installClient", str(root)]
+    execute = runner or subprocess.run
+    try:
+        completed = execute(
+            command, cwd=str(root), capture_output=True, text=True,
+            timeout=900, check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("NeoForge installer timed out after 15 minutes.") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "No installer output").strip()
+        raise ValueError("NeoForge installer failed: " + detail[-1800:])
+    versions_root = root / "versions"
+    if versions_root.is_symlink() or not versions_root.is_dir():
+        raise ValueError("NeoForge installer did not create a versions directory.")
+    candidates = []
+    expected_prefix = f"{game_version}-neoforge-"
+    for folder in versions_root.iterdir():
+        if folder.is_symlink() or not folder.is_dir() or not folder.name.startswith(expected_prefix):
+            continue
+        profile_path = folder / (folder.name + ".json")
+        if profile_path.is_symlink() or not profile_path.is_file():
+            continue
+        try:
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (isinstance(profile, dict) and profile.get("inheritsFrom") == game_version
+                and profile.get("id") == folder.name
+                and isinstance(profile.get("mainClass"), str)
+                and isinstance(profile.get("libraries"), list)):
+            candidates.append((folder.name, profile_path))
+    if len(candidates) != 1:
+        raise ValueError("NeoForge installation did not produce one valid profile for the selected Minecraft version.")
+    profile_id, profile_path = candidates[0]
+    return {
+        "game_version": game_version, "loader_version": neoforge_version,
+        "profile_id": profile_id, "profile_path": str(profile_path),
+        "output": (completed.stdout or "")[-2000:],
+    }
+
 
 
 def list_installed_mods(mods_directory):
