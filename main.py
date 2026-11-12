@@ -375,7 +375,13 @@ class JavaCheckWorker(QThread):
                     continue
             if not results:
                 raise ValueError("No working Java executable was found. Install Java or enter its full path.")
-            selected = next((item for item in results if item["compatible"]), results[0])
+            selected = next((item for item in results if item["compatible"]), None)
+            if selected is None:
+                found = ", ".join("Java {} at {}".format(item["version"], item["path"]) for item in results[:3])
+                raise ValueError(
+                    f"No detected Java runtime matches Minecraft Java {self.expected_major}. "
+                    f"Found: {found}. Install the required Java major or choose its java.exe."
+                )
             self.completed.emit(selected)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -820,6 +826,9 @@ class MainWindow(QMainWindow):
             f"{version_id} metadata validated: {java}; SHA-1 {summary['client_sha1']}."
         )
         self.metadata_worker = None
+        if not (self.java_worker and self.java_worker.isRunning()):
+            configured_java = self.java_path.text().strip()
+            self._start_java_check(configured_java or None)
 
 
     def install_selected_version_all(self):
@@ -875,7 +884,7 @@ class MainWindow(QMainWindow):
             f"{result['native_archives']} native archives, {result['verified_assets']} assets."
         )
         self.launch_status.setText(
-            f"Files for {result['version']} are installed and verified. Check Java in Settings, then press Launch."
+            f"Files for {result['version']} are installed and verified. Press Launch; VOIDEX will validate a compatible Java runtime."
         )
         self.log(
             f"Installation complete for {result['version']}: client verified; "
