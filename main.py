@@ -1755,7 +1755,11 @@ class MainWindow(QMainWindow):
         game_version = self.modrinth_game_version.text().strip()
         project = self.modrinth_projects[row]
         loader = self.modrinth_loader.currentData()
-        mods_directory = self._game_directory_for_version(game_version) / "mods"
+        try:
+            mods_directory = self._game_directory_for_version(game_version) / "mods"
+        except (OSError, ValueError) as exc:
+            self.modrinth_status.setText(f"Cannot use selected instance: {exc}")
+            return
         self.modrinth_install_button.setEnabled(False)
         self.modrinth_search_button.setEnabled(False)
         self.modrinth_status.setText(f"Finding a compatible {loader} build of {project['title']}...")
