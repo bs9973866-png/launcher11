@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock
 import urllib.request
 
-from launcher_core import (download_verified_client, download_verified_library, download_verified_version_json,
+from launcher_core import (download_verified_client, download_verified_library, download_verified_libraries, download_verified_version_json,
                            resolve_library_artifacts, summarize_version_metadata)
 
 
@@ -364,6 +364,72 @@ class LibraryDownloadTests(unittest.TestCase):
         for url in ("https://evil.example/file.jar", "http://libraries.minecraft.net/file.jar"):
             with self.subTest(url=url), self.assertRaisesRegex(ValueError, "redirected"):
                 handler.redirect_request(request, None, 302, "Found", {}, url)
+
+
+class LibraryBatchDownloadTests(unittest.TestCase):
+    def make_artifact(self, name, payload):
+        return {
+            "path": f"org/example/{name}/1.0/{name}.jar",
+            "url": f"https://libraries.minecraft.net/org/example/{name}/1.0/{name}.jar",
+            "sha1": hashlib.sha1(payload).hexdigest(),
+            "size": len(payload),
+            "source": "artifact",
+        }
+
+    def test_downloads_batch_and_reports_aggregate_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = b"first-library", b"second-library"
+            artifacts = [
+                self.make_artifact("first", first),
+                self.make_artifact("second", second),
+            ]
+            responses = [FakeResponse(first), FakeResponse(second)]
+            opener = Mock()
+            opener.open.side_effect = responses
+            progress = []
+            result = download_verified_libraries(
+                artifacts, directory,
+                progress_callback=lambda done, total, path: progress.append((done, total, path)),
+                opener_factory=lambda _item: opener,
+            )
+            self.assertEqual([path.read_bytes() for path in result], [first, second])
+            self.assertEqual(progress[-1][0:2], (len(first) + len(second), len(first) + len(second)))
+            self.assertEqual(opener.open.call_count, 2)
+
+    def test_batch_reuses_verified_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            payload = b"cached-library"
+            artifact = self.make_artifact("cached", payload)
+            target = Path(directory) / artifact["path"]
+            target.parent.mkdir(parents=True)
+            target.write_bytes(payload)
+            opener = Mock()
+            result = download_verified_libraries(
+                [artifact], directory, opener_factory=lambda _item: opener
+            )
+            self.assertEqual(result, [target])
+            opener.open.assert_not_called()
+
+    def test_batch_rejects_conflicting_duplicate_paths_before_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            one = self.make_artifact("same", b"one")
+            two = dict(one, sha1=hashlib.sha1(b"two").hexdigest(), size=3)
+            opener = Mock()
+            with self.assertRaisesRegex(ValueError, "Conflicting"):
+                download_verified_libraries(
+                    [one, two], directory, opener_factory=lambda _item: opener
+                )
+            opener.open.assert_not_called()
+
+    def test_batch_rejects_invalid_entry_before_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            opener = Mock()
+            with self.assertRaises(ValueError):
+                download_verified_libraries(
+                    [self.make_artifact("good", b"ok"), {"path": "../bad"}],
+                    directory, opener_factory=lambda _item: opener
+                )
+            opener.open.assert_not_called()
 
 
 if __name__ == "__main__":
