@@ -1078,7 +1078,7 @@ class MainWindow(QMainWindow):
         modpack_row.addWidget(self.modpack_status, 1)
         layout.addLayout(modpack_row)
 
-                self.modrinth_search_button = QPushButton("Search Modrinth")
+        self.modrinth_search_button = QPushButton("Search Modrinth")
         self.modrinth_search_button.clicked.connect(self.search_modrinth)
         controls.addWidget(self.modrinth_search, 2)
         controls.addWidget(self.modrinth_game_version)
