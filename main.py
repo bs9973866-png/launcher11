@@ -595,6 +595,10 @@ class MainWindow(QMainWindow):
         self.java_worker = None
         self.launch_worker = None
         self.minecraft_process = None
+        self.fabric_versions_worker = None
+        self.fabric_install_worker = None
+        self.fabric_profile_id = self.settings.value("fabric_profile_id", "")
+        self.fabric_profile_game_version = self.settings.value("fabric_profile_game_version", "")
         self.selected_metadata = None
         self.selected_metadata_version = None
         self.versions = []
@@ -661,6 +665,8 @@ class MainWindow(QMainWindow):
         if index == 1 and not self.versions:
             self.refresh_versions()
         if index == 2:
+            if __import__("re").fullmatch(r"\d+\.\d+(?:\.\d+)?", str(self.selected_version)):
+                self.modrinth_game_version.setText(str(self.selected_version))
             self.refresh_installed_mods()
 
     def _panel(self, title: str, subtitle: str = ""):
@@ -755,6 +761,22 @@ class MainWindow(QMainWindow):
         self.modrinth_loader.addItem("Forge", "forge")
         self.modrinth_loader.addItem("NeoForge", "neoforge")
         self.modrinth_loader.addItem("Quilt", "quilt")
+        fabric_row = QHBoxLayout()
+        self.fabric_loader_version = QComboBox()
+        self.fabric_loader_version.setMinimumWidth(150)
+        self.fabric_versions_button = QPushButton("Load Fabric builds")
+        self.fabric_versions_button.clicked.connect(self.load_fabric_versions)
+        self.fabric_install_button = QPushButton("Install Fabric loader")
+        self.fabric_install_button.clicked.connect(self.install_selected_fabric)
+        self.fabric_status = QLabel("Fabric loader can be installed here.")
+        self.fabric_status.setObjectName("Muted")
+        self.fabric_status.setWordWrap(True)
+        fabric_row.addWidget(QLabel("Fabric build"))
+        fabric_row.addWidget(self.fabric_loader_version)
+        fabric_row.addWidget(self.fabric_versions_button)
+        fabric_row.addWidget(self.fabric_install_button)
+        layout.addLayout(fabric_row)
+        layout.addWidget(self.fabric_status)
         self.modrinth_search_button = QPushButton("Search Modrinth")
         self.modrinth_search_button.clicked.connect(self.search_modrinth)
         controls.addWidget(self.modrinth_search, 2)
@@ -804,13 +826,104 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.installed_mods_table, 1)
 
         warning = QLabel(
-            "Note: this downloads mods only. The matching Fabric/Forge/NeoForge/Quilt loader "
-            "must be installed in the instance before these mods can load. Loader installation is a separate step."
+            "Fabric installation is supported here. Forge, NeoForge and Quilt installation are not available yet. "
+            "Mods must match the selected Minecraft version and installed loader."
         )
         warning.setObjectName("Muted")
         warning.setWordWrap(True)
         layout.addWidget(warning)
         return page
+
+
+    def load_fabric_versions(self):
+        if self.fabric_versions_worker and self.fabric_versions_worker.isRunning():
+            return
+        game_version = self.modrinth_game_version.text().strip()
+        self.fabric_versions_button.setEnabled(False)
+        self.fabric_status.setText(f"Loading Fabric builds for Minecraft {game_version}...")
+        self.fabric_versions_worker = FabricVersionsWorker(game_version, self)
+        self.fabric_versions_worker.loaded.connect(self._fabric_versions_loaded)
+        self.fabric_versions_worker.failed.connect(self._fabric_versions_failed)
+        self.fabric_versions_worker.finished.connect(self._fabric_versions_finished)
+        self.fabric_versions_worker.start()
+
+    def _fabric_versions_loaded(self, versions):
+        self.fabric_loader_version.clear()
+        for item in versions:
+            label = item["version"] + ("" if item["stable"] else " (unstable)")
+            self.fabric_loader_version.addItem(label, item["version"])
+        self.fabric_status.setText(
+            f"Found {len(versions)} Fabric build(s). Stable builds are listed first by Fabric."
+        )
+
+    def _fabric_versions_failed(self, error):
+        self.fabric_status.setText(f"Fabric version lookup failed: {error}")
+        self.log(f"Fabric version lookup failed: {error}")
+
+    def _fabric_versions_finished(self):
+        self.fabric_versions_button.setEnabled(True)
+        self.fabric_versions_worker = None
+
+    def install_selected_fabric(self):
+        if self.fabric_install_worker and self.fabric_install_worker.isRunning():
+            return
+        game_version = self.modrinth_game_version.text().strip()
+        loader_version = self.fabric_loader_version.currentData()
+        java_executable = self.java_path.text().strip()
+        if not loader_version:
+            self.fabric_status.setText("Load and select a Fabric build first.")
+            return
+        if not java_executable:
+            self.fabric_status.setText("Set a Java executable in Settings before installing Fabric.")
+            self._navigate(4)
+            return
+        if game_version != self.selected_version:
+            QMessageBox.information(
+                self, "VOIDEX",
+                "The Mods page version must match the selected Minecraft version. Select it on the Versions page first."
+            )
+            return
+        self.fabric_install_button.setEnabled(False)
+        self.fabric_versions_button.setEnabled(False)
+        self.fabric_status.setText("Preparing official Fabric installer...")
+        self.fabric_install_worker = FabricInstallWorker(
+            game_version, loader_version, java_executable,
+            Path.home() / ".voidex", self,
+        )
+        self.fabric_install_worker.stage.connect(self._fabric_install_stage)
+        self.fabric_install_worker.completed.connect(self._fabric_install_completed)
+        self.fabric_install_worker.failed.connect(self._fabric_install_failed)
+        self.fabric_install_worker.finished.connect(self._fabric_install_finished)
+        self.fabric_install_worker.start()
+        self.log(f"Installing Fabric {loader_version} for Minecraft {game_version}.")
+
+    def _fabric_install_stage(self, stage):
+        self.fabric_status.setText(stage + "...")
+        self.log(stage + ".")
+
+    def _fabric_install_completed(self, result):
+        self.fabric_profile_id = result["profile_id"]
+        self.fabric_profile_game_version = result["game_version"]
+        self.settings.setValue("fabric_profile_id", self.fabric_profile_id)
+        self.settings.setValue("fabric_profile_game_version", self.fabric_profile_game_version)
+        self.fabric_status.setText(
+            f"Fabric {result['loader_version']} installed for Minecraft {result['game_version']}."
+        )
+        self.log(
+            f"Fabric profile ready: {result['profile_id']} (installer {result['installer_version']})."
+        )
+        self.launch_status.setText(
+            f"Fabric profile installed for {result['game_version']}. Launch uses it when that version is selected."
+        )
+
+    def _fabric_install_failed(self, error):
+        self.fabric_status.setText(f"Fabric installation failed: {error}")
+        self.log(f"Fabric installation failed: {error}")
+
+    def _fabric_install_finished(self):
+        self.fabric_install_button.setEnabled(True)
+        self.fabric_versions_button.setEnabled(True)
+        self.fabric_install_worker = None
 
     def refresh_installed_mods(self):
         version = self.modrinth_game_version.text().strip()
@@ -1697,7 +1810,8 @@ class MainWindow(QMainWindow):
         self.launch_worker = LaunchCheckWorker(
             self.selected_version, entry, self.java_path.text().strip(),
             int(self.ram.currentText()), extra_jvm,
-            self.account_source.currentText(), self.player_name.text().strip(), self,
+            self.account_source.currentText(), self.player_name.text().strip(),
+            self.fabric_profile_id if self.fabric_profile_game_version == self.selected_version else None, self,
         )
         self.launch_worker.ready.connect(self._launch_plan_ready)
         self.launch_worker.failed.connect(self._launch_plan_failed)
