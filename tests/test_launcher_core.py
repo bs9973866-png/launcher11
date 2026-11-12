@@ -422,7 +422,8 @@ class LibraryBatchDownloadTests(unittest.TestCase):
             result = download_verified_libraries(
                 [artifact], directory, opener_factory=lambda _item: opener
             )
-            self.assertEqual(result, [target])
+            self.assertEqual(len(result), 1)
+            self.assertTrue(result[0].samefile(target))
             opener.open.assert_not_called()
 
     def test_batch_rejects_conflicting_duplicate_paths_before_network(self):
