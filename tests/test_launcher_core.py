@@ -11,7 +11,8 @@ import urllib.request
 
 from launcher_core import (download_verified_client, download_verified_library, download_verified_libraries, download_verified_version_json,
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata,
-                           extract_native_archives, discover_java_candidates, validate_java_executable)
+                           extract_native_archives, discover_java_candidates, validate_java_executable,
+                           build_minecraft_classpath, build_launch_plan)
 
 
 def sample_metadata():
@@ -614,3 +615,173 @@ class JavaDiscoveryTests(unittest.TestCase):
             with patch("launcher_core.subprocess.run", return_value=completed):
                 with self.assertRaisesRegex(ValueError, "recognizable"):
                     validate_java_executable(java)
+
+
+class LaunchPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.java = self.root / ("java.exe" if os.name == "nt" else "java")
+        self.java.write_bytes(b"java")
+        self.client = self.root / "client.jar"
+        self.client.write_bytes(b"client")
+        self.libs = self.root / "libraries"
+        self.libs.mkdir()
+        self.natives = self.root / "natives"
+        self.natives.mkdir()
+        self.game = self.root / "game"
+        self.game.mkdir()
+        self.assets = self.root / "assets"
+        self.assets.mkdir()
+        self.auth = {
+            "player_name": "PlayerOne",
+            "uuid": "12345678-1234-1234-1234-123456789abc",
+            "access_token": "explicit-offline-token",
+            "user_type": "legacy",
+        }
+        payload = b"library"
+        self.library = {
+            "name": "org.example:demo:1.0",
+            "downloads": {"artifact": {
+                "path": "org/example/demo/1.0/demo-1.0.jar",
+                "url": "https://libraries.minecraft.net/org/example/demo/1.0/demo-1.0.jar",
+                "sha1": hashlib.sha1(payload).hexdigest(),
+                "size": len(payload),
+            }},
+        }
+        target = self.libs / self.library["downloads"]["artifact"]["path"]
+        target.parent.mkdir(parents=True)
+        target.write_bytes(payload)
+        self.metadata = {
+            "id": "1.20.4",
+            "mainClass": "net.minecraft.client.main.Main",
+            "javaVersion": {"majorVersion": 17},
+            "assetIndex": {"id": "12"},
+            "libraries": [self.library],
+            "arguments": {
+                "jvm": [
+                    "-Djava.library.path=${natives_directory}",
+                    "-cp", "${classpath}",
+                    {"rules": [{"action": "allow", "os": {"name": "windows"}}],
+                     "value": "-Dvoidex.windows=true"},
+                ],
+                "game": [
+                    "--username", "${auth_player_name}",
+                    "--uuid", "${auth_uuid}",
+                    "--gameDir", "${game_directory}",
+                    {"rules": [{"action": "allow", "features": {"has_custom_resolution": True}}],
+                     "value": ["--width", "${resolution_width}"]},
+                ],
+            },
+        }
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_classpath_contains_artifact_and_client_but_not_natives(self):
+        native_payload = b"native"
+        native = {
+            "name": "org.example:native:1.0",
+            "natives": {"windows": "natives-windows"},
+            "downloads": {"classifiers": {"natives-windows": {
+                "path": "org/example/native/1.0/native.jar",
+                "url": "https://libraries.minecraft.net/org/example/native/1.0/native.jar",
+                "sha1": hashlib.sha1(native_payload).hexdigest(),
+                "size": len(native_payload),
+            }}},
+        }
+        metadata = dict(self.metadata, libraries=[self.library, native])
+        native_path = self.libs / "org/example/native/1.0/native.jar"
+        native_path.parent.mkdir(parents=True)
+        native_path.write_bytes(native_payload)
+        result = build_minecraft_classpath(
+            metadata, self.client, self.libs, os_name="windows", arch="x86_64"
+        )
+        self.assertIn(str(self.client), result)
+        self.assertIn("demo-1.0.jar", result)
+        self.assertNotIn("native.jar", result)
+        self.assertIn(";", result)
+
+    def test_missing_required_library_is_rejected(self):
+        (self.libs / self.library["downloads"]["artifact"]["path"]).unlink()
+        with self.assertRaisesRegex(ValueError, "library is missing"):
+            build_minecraft_classpath(
+                self.metadata, self.client, self.libs,
+                os_name="windows", arch="x86_64"
+            )
+
+    def test_modern_arguments_are_substituted_and_rules_applied(self):
+        plan = build_launch_plan(
+            self.metadata, java_executable=self.java, client_jar=self.client,
+            libraries_root=self.libs, natives_directory=self.natives,
+            game_directory=self.game, assets_root=self.assets, auth=self.auth,
+            java_validation={"compatible": True, "path": str(self.java)},
+            os_name="windows", arch="x86_64",
+        )
+        self.assertEqual(plan["main_class"], "net.minecraft.client.main.Main")
+        self.assertIn("PlayerOne", plan["game_arguments"])
+        self.assertIn(str(self.game), plan["game_arguments"])
+        self.assertIn("1280", plan["game_arguments"])
+        self.assertIn("-Dvoidex.windows=true", plan["jvm_arguments"])
+        self.assertEqual(plan["argv"][0], str(self.java))
+        self.assertEqual(plan["cwd"], str(self.game))
+
+    def test_argument_rules_exclude_other_platform(self):
+        metadata = dict(self.metadata)
+        metadata["arguments"] = {
+            "jvm": [{"rules": [{"action": "allow", "os": {"name": "linux"}}],
+                     "value": "-Dlinux.only=true"}],
+            "game": ["--username", "${auth_player_name}"],
+        }
+        plan = build_launch_plan(
+            metadata, java_executable=self.java, client_jar=self.client,
+            libraries_root=self.libs, natives_directory=self.natives,
+            game_directory=self.game, assets_root=self.assets, auth=self.auth,
+            java_validation={"compatible": True, "path": str(self.java)},
+            os_name="windows", arch="x86_64",
+        )
+        self.assertNotIn("-Dlinux.only=true", plan["jvm_arguments"])
+
+    def test_legacy_arguments_are_parsed_without_losing_quoted_values(self):
+        metadata = dict(self.metadata)
+        metadata.pop("arguments")
+        metadata["minecraftArguments"] = '--username "${auth_player_name}" --gameDir "${game_directory}"'
+        plan = build_launch_plan(
+            metadata, java_executable=self.java, client_jar=self.client,
+            libraries_root=self.libs, natives_directory=self.natives,
+            game_directory=self.game, assets_root=self.assets, auth=self.auth,
+            java_validation={"compatible": True, "path": str(self.java)},
+            os_name="linux", arch="x86_64",
+        )
+        self.assertEqual(plan["game_arguments"][1], "PlayerOne")
+        self.assertEqual(plan["game_arguments"][3], str(self.game))
+
+    def test_unresolved_placeholder_and_incomplete_auth_are_rejected(self):
+        metadata = dict(self.metadata)
+        metadata["arguments"] = {"jvm": [], "game": ["${missing_secret}"]}
+        with self.assertRaisesRegex(ValueError, "Unresolved"):
+            build_launch_plan(
+                metadata, java_executable=self.java, client_jar=self.client,
+                libraries_root=self.libs, natives_directory=self.natives,
+                game_directory=self.game, assets_root=self.assets, auth=self.auth,
+                java_validation={"compatible": True, "path": str(self.java)},
+                os_name="windows", arch="x86_64",
+            )
+        with self.assertRaisesRegex(ValueError, "session is incomplete"):
+            build_launch_plan(
+                self.metadata, java_executable=self.java, client_jar=self.client,
+                libraries_root=self.libs, natives_directory=self.natives,
+                game_directory=self.game, assets_root=self.assets, auth={"player_name": "PlayerOne"},
+                java_validation={"compatible": True, "path": str(self.java)},
+                os_name="windows", arch="x86_64",
+            )
+
+    def test_java_mismatch_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            build_launch_plan(
+                self.metadata, java_executable=self.java, client_jar=self.client,
+                libraries_root=self.libs, natives_directory=self.natives,
+                game_directory=self.game, assets_root=self.assets, auth=self.auth,
+                java_validation={"compatible": False, "path": str(self.java)},
+                os_name="windows", arch="x86_64",
+            )
