@@ -6,6 +6,7 @@ performed by the UI/launch worker in a later integration step.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -85,7 +86,7 @@ def create_instance_profile(root, name, game_version, loader="vanilla") -> dict:
         "name": name,
         "game_version": game_version,
         "loader": loader,
-        "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "game_directory": "game",
     }
     target = directory / "profile.json"
