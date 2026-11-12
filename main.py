@@ -342,6 +342,13 @@ class LaunchCheckWorker(QThread):
                 raise ValueError("This version has no supported asset index.")
             asset_index_path = home / "assets" / "indexes" / f"{asset_ref['id']}.json"
             objects_root = home / "assets" / "objects"
+            if asset_ref.get("sha1"):
+                index_digest = hashlib.sha1()
+                with asset_index_path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        index_digest.update(chunk)
+                if index_digest.hexdigest().lower() != asset_ref["sha1"].lower():
+                    raise ValueError("Asset index SHA-1 mismatch; install assets again.")
             verify_cached_asset_objects(asset_index_path, objects_root)
 
             expected_java = (metadata.get("javaVersion") or {}).get("majorVersion")
