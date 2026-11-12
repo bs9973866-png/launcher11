@@ -21,10 +21,11 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             fetch_neoforge_loader_versions, install_neoforge_loader, merge_neoforge_profile_metadata,
                             fetch_quilt_loader_versions, install_quilt_loader, merge_quilt_profile_metadata,
                             install_modrinth_mrpack)
+from instance_profiles import create_instance_profile, list_instance_profiles, resolve_instance_profile
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QInputDialog,
     QMainWindow, QPushButton, QPlainTextEdit, QStackedWidget, QVBoxLayout,
     QWidget, QFormLayout, QTableWidget, QTableWidgetItem, QMessageBox, QFileDialog
 )
@@ -643,13 +644,14 @@ class LaunchCheckWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, version_id, manifest_entry, java_executable, ram_mb,
-                 extra_jvm, account_source, nickname, fabric_profile_id=None, forge_profile_id=None, neoforge_profile_id=None, quilt_profile_id=None, parent=None):
+                 extra_jvm, account_source, nickname, fabric_profile_id=None, forge_profile_id=None, neoforge_profile_id=None, quilt_profile_id=None, instance_profile_id=None, parent=None):
         super().__init__(parent)
         self.version_id = version_id
         self.fabric_profile_id = fabric_profile_id
         self.forge_profile_id = forge_profile_id
         self.neoforge_profile_id = neoforge_profile_id
         self.quilt_profile_id = quilt_profile_id
+        self.instance_profile_id = instance_profile_id
         self.manifest_entry = dict(manifest_entry)
         self.java_executable = java_executable
         self.ram_mb = ram_mb
@@ -776,7 +778,13 @@ class LaunchCheckWorker(QThread):
                     + detail
                 )
 
-            game_directory = home / "instances" / self.version_id
+            if self.instance_profile_id:
+                selected_instance = resolve_instance_profile(
+                    home / "profiles", self.instance_profile_id, self.version_id
+                )
+                game_directory = Path(selected_instance["game_directory_path"])
+            else:
+                game_directory = home / "instances" / self.version_id
             game_directory.mkdir(parents=True, exist_ok=True)
             auth = {
                 "player_name": self.nickname,
@@ -842,11 +850,13 @@ class MainWindow(QMainWindow):
         self.selected_metadata_version = None
         self.versions = []
         self.selected_version = self.settings.value("selected_version", "latest-release")
+        self.selected_instance_id = self.settings.value("selected_instance_id", "")
         self.setWindowTitle("VOIDEX Launcher")
         self.resize(1180, 740)
         self.setMinimumSize(900, 600)
         self._build_ui()
         self._restore_settings()
+        self.refresh_instance_profiles()
         self._refresh_identity()
         self.log("VOIDEX initialized. Background polling and idle animation timers are disabled.")
         self.log("Version catalog connects to Mojang only when you open Versions or press Refresh.")
@@ -940,6 +950,23 @@ class MainWindow(QMainWindow):
         self.home_version = QLabel(f"Selected version: {self.selected_version}")
         self.home_version.setObjectName("Muted")
         hero_layout.addWidget(self.home_version)
+        instance_row = QHBoxLayout()
+        self.instance_selector = QComboBox()
+        self.instance_selector.setMinimumWidth(220)
+        self.instance_selector.currentIndexChanged.connect(self._instance_selection_changed)
+        self.create_instance_button = QPushButton("＋ New instance")
+        self.create_instance_button.clicked.connect(self.create_instance)
+        self.refresh_instances_button = QPushButton("↻")
+        self.refresh_instances_button.setToolTip("Refresh instance list")
+        self.refresh_instances_button.clicked.connect(self.refresh_instance_profiles)
+        instance_row.addWidget(QLabel("INSTANCE"))
+        instance_row.addWidget(self.instance_selector, 1)
+        instance_row.addWidget(self.create_instance_button)
+        instance_row.addWidget(self.refresh_instances_button)
+        hero_layout.addLayout(instance_row)
+        self.instance_status = QLabel("Each instance has its own worlds, mods and settings folder.")
+        self.instance_status.setObjectName("Muted")
+        hero_layout.addWidget(self.instance_status)
         self.launch_button = QPushButton("LAUNCH MINECRAFT")
         self.launch_button.setObjectName("Primary")
         self.launch_button.clicked.connect(self.launch_selected_game)
@@ -2436,7 +2463,8 @@ class MainWindow(QMainWindow):
             self.fabric_profile_id if self.fabric_profile_game_version == self.selected_version else None,
             self.forge_profile_id if self.forge_profile_game_version == self.selected_version else None,
             self.neoforge_profile_id if self.neoforge_profile_game_version == self.selected_version else None,
-            self.quilt_profile_id if self.quilt_profile_game_version == self.selected_version else None, self,
+            self.quilt_profile_id if self.quilt_profile_game_version == self.selected_version else None,
+            self.selected_instance_id or None, self,
         )
         self.launch_worker.ready.connect(self._launch_plan_ready)
         self.launch_worker.failed.connect(self._launch_plan_failed)
