@@ -23,9 +23,11 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             install_modrinth_mrpack)
 from instance_profiles import (create_instance_profile, list_instance_profiles, resolve_instance_profile,
                                 rename_instance_profile, delete_instance_profile, update_instance_profile_loader,
-                                set_instance_profile_loader_profile, resolve_instance_mods_directory,\n                                resolve_instance_resource_directories)
+                                set_instance_profile_loader_profile, resolve_instance_mods_directory,
+                                resolve_instance_resource_directories)
 
-from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer, QUrl\nfrom PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QInputDialog,
     QMainWindow, QPushButton, QPlainTextEdit, QStackedWidget, QVBoxLayout,
@@ -1128,7 +1130,9 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Remove instance",
-            f"Remove '{selected['name']}' from the VOIDEX instance list?\n\n"
+            f"Remove '{selected['name']}' from the VOIDEX instance list?
+
+"
             "Its game files, worlds, mods and settings will be kept on disk. "
             "Only the profile entry is removed, so this instance will no longer appear in the launcher.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
