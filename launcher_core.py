@@ -6,9 +6,13 @@ handling can be tested independently.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import tempfile
 import urllib.request
+from pathlib import Path
 from urllib.parse import urlparse
 
 MANIFEST_HOST = "piston-meta.mojang.com"
@@ -64,3 +68,88 @@ def summarize_version_metadata(metadata: dict) -> dict:
         "libraries_count": len(metadata.get("libraries", []))
         if isinstance(metadata.get("libraries", []), list) else 0,
     }
+
+
+CLIENT_DOWNLOAD_HOSTS = {"piston-data.mojang.com", "launcher.mojang.com"}
+DOWNLOAD_CHUNK_SIZE = 256 * 1024
+
+
+class MojangRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Prevent trusted metadata URLs from redirecting to arbitrary hosts."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlparse(newurl)
+        if parsed.scheme != "https" or parsed.hostname not in CLIENT_DOWNLOAD_HOSTS:
+            raise ValueError("Mojang download redirected to an untrusted host.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def download_verified_client(summary, destination, progress_callback=None, opener=None):
+    """Stream a Mojang client JAR to a temp file; verify size/SHA-1 before atomic replace."""
+    if not isinstance(summary, dict):
+        raise ValueError("Invalid client download summary.")
+    url = summary.get("client_url")
+    parsed = urlparse(url if isinstance(url, str) else "")
+    if parsed.scheme != "https" or parsed.hostname not in CLIENT_DOWNLOAD_HOSTS:
+        raise ValueError("Client download URL is not trusted.")
+    expected_sha1 = summary.get("client_sha1")
+    expected_size = summary.get("client_size")
+    if not isinstance(expected_sha1, str) or not _SHA1_RE.fullmatch(expected_sha1):
+        raise ValueError("Invalid expected SHA-1 checksum.")
+    if not isinstance(expected_size, int) or isinstance(expected_size, bool) or expected_size <= 0:
+        raise ValueError("Invalid expected download size.")
+
+    target = Path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_file() and target.stat().st_size == expected_size:
+        digest = hashlib.sha1()
+        with target.open("rb") as existing:
+            for chunk in iter(lambda: existing.read(DOWNLOAD_CHUNK_SIZE), b""):
+                digest.update(chunk)
+        if digest.hexdigest() == expected_sha1.lower():
+            if progress_callback:
+                progress_callback(expected_size, expected_size)
+            return target
+
+    request = urllib.request.Request(url, headers={"User-Agent": "VOIDEX-Launcher/0.3"})
+    if opener is None:
+        opener = urllib.request.build_opener(MojangRedirectHandler())
+
+    temp_path = None
+    digest = hashlib.sha1()
+    downloaded = 0
+    try:
+        with opener.open(request, timeout=30) as response:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=target.name + ".", suffix=".part",
+                dir=str(target.parent), delete=False
+            ) as temporary:
+                temp_path = Path(temporary.name)
+                while True:
+                    chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+                    if downloaded > expected_size:
+                        raise ValueError("Downloaded client JAR is larger than Mojang metadata declares.")
+                    temporary.write(chunk)
+                    digest.update(chunk)
+                    if progress_callback:
+                        progress_callback(downloaded, expected_size)
+
+        if downloaded != expected_size:
+            raise ValueError(
+                f"Incomplete client JAR: expected {expected_size} bytes, received {downloaded}."
+            )
+        if digest.hexdigest() != expected_sha1.lower():
+            raise ValueError("Client JAR SHA-1 verification failed.")
+
+        os.replace(temp_path, target)
+        temp_path = None
+        return target
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
