@@ -809,9 +809,13 @@ class ModrinthIntegrationTests(unittest.TestCase):
             }
         }
         class BinaryResponse:
+            def __init__(self): self.offset = 0
             def __enter__(self): return self
             def __exit__(self, *args): return False
-            def read(self, limit): return payload
+            def read(self, limit):
+                chunk = payload[self.offset:self.offset + limit]
+                self.offset += len(chunk)
+                return chunk
         class BinaryOpener:
             def open(self, request, timeout): return BinaryResponse()
         with tempfile.TemporaryDirectory() as directory:
