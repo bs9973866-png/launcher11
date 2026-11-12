@@ -1,5 +1,4 @@
 import hashlib
-import io
 import stat
 import zipfile
 import tempfile
@@ -537,11 +536,11 @@ class NativeArchiveExtractionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 extract_native_archives([first, second], Path(directory) / "out")
 
-    def test_cleans_temporary_file_after_failed_entry_write(self):
+    def test_rejects_oversized_entry_before_creating_temp_files(self):
         with tempfile.TemporaryDirectory() as directory:
             archive = self.make_archive(directory, [("native.dll", b"payload")])
             output = Path(directory) / "out"
             # A deliberately restrictive limit trips during the streaming write.
-            with self.assertRaisesRegex(ValueError, "expanded"):
+            with self.assertRaisesRegex(ValueError, "file above"):
                 extract_native_archives([archive], output, max_file_size=3)
             self.assertEqual(list(output.rglob("*.part")), [])
