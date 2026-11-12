@@ -1,15 +1,17 @@
 import hashlib
+import os
 import stat
 import zipfile
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+import subprocess
 import urllib.request
 
 from launcher_core import (download_verified_client, download_verified_library, download_verified_libraries, download_verified_version_json,
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata,
-                           extract_native_archives)
+                           extract_native_archives, discover_java_candidates, validate_java_executable)
 
 
 def sample_metadata():
@@ -545,3 +547,70 @@ class NativeArchiveExtractionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "file above"):
                 extract_native_archives([archive], output, max_file_size=3)
             self.assertEqual(list(output.rglob("*.part")), [])
+
+
+
+class JavaDiscoveryTests(unittest.TestCase):
+    def test_discovers_java_home_and_extra_path_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = "java.exe" if os.name == "nt" else "java"
+            home_java = root / "jdk-home" / "bin" / executable
+            extra_java = root / "extra" / executable
+            home_java.parent.mkdir(parents=True)
+            extra_java.parent.mkdir(parents=True)
+            home_java.write_bytes(b"")
+            extra_java.write_bytes(b"")
+            found = discover_java_candidates(
+                extra_paths=[extra_java],
+                environ={"JAVA_HOME": str(home_java.parent.parent), "PATH": ""},
+                path_value="",
+            )
+            self.assertEqual(found, [extra_java.resolve(), home_java.resolve()])
+
+    def test_ignores_missing_candidates_and_deduplicates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            java = Path(directory) / ("java.exe" if os.name == "nt" else "java")
+            java.write_bytes(b"")
+            found = discover_java_candidates(
+                extra_paths=[java, java, Path(directory) / "missing"],
+                environ={"PATH": ""}, path_value="",
+            )
+            self.assertEqual(found, [java.resolve()])
+
+    def test_parses_modern_java_version_from_stderr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            java = Path(directory) / ("java.exe" if os.name == "nt" else "java")
+            java.write_bytes(b"")
+            completed = subprocess.CompletedProcess(
+                [str(java), "-version"], 0, "", 'openjdk version "21.0.2" 2024-01-16'
+            )
+            with patch("launcher_core.subprocess.run", return_value=completed) as run:
+                result = validate_java_executable(java, expected_major=21)
+            self.assertEqual(result["major"], 21)
+            self.assertTrue(result["compatible"])
+            run.assert_called_once()
+
+    def test_parses_legacy_java_8_and_reports_incompatibility(self):
+        with tempfile.TemporaryDirectory() as directory:
+            java = Path(directory) / ("java.exe" if os.name == "nt" else "java")
+            java.write_bytes(b"")
+            completed = subprocess.CompletedProcess(
+                [str(java), "-version"], 0, "", 'java version "1.8.0_402"'
+            )
+            with patch("launcher_core.subprocess.run", return_value=completed):
+                result = validate_java_executable(java, expected_major=17)
+            self.assertEqual(result["major"], 8)
+            self.assertFalse(result["compatible"])
+
+    def test_rejects_missing_and_unrecognized_java(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "java"
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                validate_java_executable(missing)
+            java = Path(directory) / ("java.exe" if os.name == "nt" else "java")
+            java.write_bytes(b"")
+            completed = subprocess.CompletedProcess([str(java), "-version"], 1, "", "not java")
+            with patch("launcher_core.subprocess.run", return_value=completed):
+                with self.assertRaisesRegex(ValueError, "recognizable"):
+                    validate_java_executable(java)
