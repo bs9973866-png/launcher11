@@ -1804,6 +1804,148 @@ def merge_fabric_profile_metadata(base_metadata, profile, libraries_root):
     return merged
 
 
+def merge_neoforge_profile_metadata(base_metadata, profile, libraries_root):
+    """Merge a generated NeoForge client profile and validate its installed libraries."""
+    if not isinstance(base_metadata, dict) or not isinstance(profile, dict):
+        raise ValueError("Invalid Minecraft or NeoForge profile metadata.")
+    base_id = base_metadata.get("id")
+    if not isinstance(base_id, str) or profile.get("inheritsFrom") != base_id:
+        raise ValueError("NeoForge profile does not inherit from the selected Minecraft version.")
+    profile_id = profile.get("id")
+    if (not isinstance(profile_id, str)
+            or not re.fullmatch(re.escape(base_id) + r"-neoforge-[A-Za-z0-9_.+-]+", profile_id)):
+        raise ValueError("NeoForge profile ID is invalid for the selected Minecraft version.")
+    main_class = profile.get("mainClass")
+    if not isinstance(main_class, str) or not main_class.strip():
+        raise ValueError("NeoForge profile has no client main class.")
+
+    root = Path(libraries_root).expanduser()
+    if root.is_symlink():
+        raise ValueError("NeoForge libraries directory must not be a symbolic link.")
+    root.mkdir(parents=True, exist_ok=True)
+    libraries_root = root.resolve()
+    base_libraries = base_metadata.get("libraries", [])
+    profile_libraries = profile.get("libraries", [])
+    if not isinstance(base_libraries, list) or not isinstance(profile_libraries, list):
+        raise ValueError("Minecraft or NeoForge library metadata is invalid.")
+
+    merged = dict(base_metadata)
+    by_name = {}
+    for item in base_libraries:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ValueError("Minecraft profile contains an invalid library entry.")
+        by_name[item["name"]] = dict(item)
+
+    trusted_hosts = {
+        "maven.neoforged.net", "libraries.minecraft.net",
+        "repo.maven.apache.org", "repo1.maven.org",
+        "maven.minecraftforge.net", "maven.fabricmc.net",
+    }
+    for raw in profile_libraries:
+        if not isinstance(raw, dict) or not isinstance(raw.get("name"), str):
+            raise ValueError("NeoForge profile contains an invalid library entry.")
+        item = dict(raw)
+        coordinate_text = item["name"].split("@", 1)
+        coordinate = coordinate_text[0].split(":")
+        extension = coordinate_text[1] if len(coordinate_text) == 2 else "jar"
+        if len(coordinate) not in (3, 4) or not all(coordinate[:3]):
+            raise ValueError(f"Unsupported NeoForge Maven coordinate: {item['name']}")
+        group, artifact_name, version = coordinate[:3]
+        classifier = coordinate[3] if len(coordinate) == 4 else None
+        if (not re.fullmatch(r"[A-Za-z0-9_.-]+", group)
+                or not re.fullmatch(r"[A-Za-z0-9_.-]+", artifact_name)
+                or not re.fullmatch(r"[A-Za-z0-9_.+-]+", version)
+                or not re.fullmatch(r"[A-Za-z0-9_.-]+", extension)
+                or (classifier and not re.fullmatch(r"[A-Za-z0-9_.-]+", classifier))):
+            raise ValueError("NeoForge Maven coordinate contains unsafe characters.")
+
+        downloads = item.get("downloads")
+        artifact = downloads.get("artifact") if isinstance(downloads, dict) else None
+        if artifact is not None:
+            if not isinstance(artifact, dict):
+                raise ValueError("NeoForge library artifact metadata is invalid.")
+            raw_path = artifact.get("path")
+            raw_url = artifact.get("url")
+            if (not isinstance(raw_path, str) or not raw_path or "\\" in raw_path
+                    or not isinstance(raw_url, str)):
+                raise ValueError("NeoForge library artifact path or URL is invalid.")
+            relative_posix = PurePosixPath(raw_path)
+            if relative_posix.is_absolute() or any(part in {"", ".", ".."} for part in relative_posix.parts):
+                raise ValueError("NeoForge library artifact path escapes the libraries directory.")
+            relative = Path(*relative_posix.parts)
+            url = raw_url
+        else:
+            filename = f"{artifact_name}-{version}" + (f"-{classifier}" if classifier else "") + f".{extension}"
+            relative = Path(*group.split(".")) / artifact_name / version / filename
+            repository = item.get("url") or "https://maven.neoforged.net/releases/"
+            parsed_repository = urlparse(repository)
+            if (parsed_repository.scheme != "https" or parsed_repository.hostname not in trusted_hosts
+                    or parsed_repository.username is not None or parsed_repository.password is not None):
+                raise ValueError("NeoForge library repository is not trusted.")
+            url = repository.rstrip("/") + "/" + relative.as_posix()
+
+        parsed_url = urlparse(url)
+        if (parsed_url.scheme != "https" or parsed_url.hostname not in trusted_hosts
+                or parsed_url.username is not None or parsed_url.password is not None):
+            raise ValueError("NeoForge library artifact URL is not trusted.")
+        candidate = libraries_root / relative
+        current = candidate
+        while current != libraries_root:
+            if current.is_symlink():
+                raise ValueError("NeoForge library path contains a symbolic link.")
+            current = current.parent
+        candidate = candidate.resolve()
+        try:
+            candidate.relative_to(libraries_root)
+        except ValueError as exc:
+            raise ValueError("NeoForge library path escapes the libraries directory.") from exc
+        if not candidate.is_file():
+            raise ValueError(
+                f"NeoForge library is missing; reinstall the loader: {relative.as_posix()}"
+            )
+        size = candidate.stat().st_size
+        expected_size = artifact.get("size") if isinstance(artifact, dict) else None
+        expected_sha1 = artifact.get("sha1") if isinstance(artifact, dict) else None
+        if expected_size is not None and (not isinstance(expected_size, int)
+                or isinstance(expected_size, bool) or size != expected_size):
+            raise ValueError("NeoForge library size mismatch; reinstall the loader.")
+        digest = hashlib.sha1()
+        with candidate.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
+                digest.update(chunk)
+        actual_sha1 = digest.hexdigest()
+        if expected_sha1 is not None and (
+                not isinstance(expected_sha1, str) or not _SHA1_RE.fullmatch(expected_sha1)
+                or actual_sha1 != expected_sha1.lower()):
+            raise ValueError("NeoForge library SHA-1 mismatch; reinstall the loader.")
+        item["downloads"] = {"artifact": {
+            "path": relative.as_posix(), "url": url,
+            "sha1": actual_sha1, "size": size,
+        }}
+        by_name[item["name"]] = item
+
+    merged["id"] = profile_id
+    merged["inheritsFrom"] = base_id
+    merged["mainClass"] = main_class
+    merged["libraries"] = list(by_name.values())
+    base_arguments = base_metadata.get("arguments")
+    profile_arguments = profile.get("arguments")
+    if isinstance(base_arguments, dict) or isinstance(profile_arguments, dict):
+        result = {}
+        for key in ("jvm", "game"):
+            base_values = (base_arguments or {}).get(key, []) if isinstance(base_arguments, dict) else []
+            profile_values = (profile_arguments or {}).get(key, []) if isinstance(profile_arguments, dict) else []
+            if not isinstance(base_values, list) or not isinstance(profile_values, list):
+                raise ValueError("NeoForge launch arguments are invalid.")
+            result[key] = list(base_values) + list(profile_values)
+        merged["arguments"] = result
+    elif isinstance(profile.get("minecraftArguments"), str):
+        merged["minecraftArguments"] = profile["minecraftArguments"]
+    if isinstance(profile.get("logging"), dict):
+        merged["logging"] = profile["logging"]
+    return merged
+
+
 def merge_forge_profile_metadata(base_metadata, profile, libraries_root):
     """Merge an installed Forge client profile and require every added library locally."""
     if not isinstance(base_metadata, dict) or not isinstance(profile, dict):
