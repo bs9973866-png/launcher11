@@ -15,6 +15,7 @@ A lightweight, customizable Minecraft Java launcher for Windows, built with Pyth
 - Optional download of the selected client JAR into a local VOIDEX cache, with streamed progress, byte-count and SHA-1 verification, temporary-file cleanup and atomic replacement. A previously verified cached file is reused.
 - Local Minecraft-compatible offline UUID generation from a player nickname.
 - Java discovery from JAVA_HOME, PATH and common Windows JDK vendor folders, plus background Java executable validation against the selected Minecraft version's declared Java major. The detected executable path is saved in settings.
+- A tested launch-plan builder that checks Java compatibility, required library/client files, builds a platform-specific classpath without native classifier JARs, applies Mojang OS/feature rules, expands modern or legacy game arguments, and returns a shell-free argv/cwd plan. Account credentials must be explicitly supplied; the planner does not fabricate online sessions.
 - Low-end, Balanced and High-end starting presets, editable RAM allocation, rendering profile and JVM arguments.
 - Settings and the selected version are persisted with Qt settings.
 - No permanent animation timers, polling loops, or background network requests. The Mojang manifest is requested only when the Versions page is opened or Refresh is pressed.
@@ -23,7 +24,7 @@ A lightweight, customizable Minecraft Java launcher for Windows, built with Pyth
 
 This is an active preview, not a finished launcher. The following are not connected yet:
 
-- Remaining full Minecraft installation work: building the classpath and game arguments, and launching/monitoring the game process. Library and asset actions cache verified files but do not yet create a playable installation or launch Minecraft.
+- Actual Java process creation and lifecycle monitoring. The launch-plan builder validates and assembles arguments but does not start Minecraft; cached assets also still need runtime-specific legacy/virtual asset handling and a full install-readiness check.
 - Ely.by and Microsoft authentication.
 - Online skin lookup, skin upload and 3D skin preview.
 - Modrinth / CurseForge downloads and mod-loader installation.
