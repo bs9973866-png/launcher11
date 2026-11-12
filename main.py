@@ -22,7 +22,7 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             fetch_quilt_loader_versions, install_quilt_loader, merge_quilt_profile_metadata,
                             install_modrinth_mrpack)
 from instance_profiles import (create_instance_profile, list_instance_profiles, resolve_instance_profile,
-                                rename_instance_profile, delete_instance_profile)
+                                rename_instance_profile, delete_instance_profile, update_instance_profile_loader)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -116,13 +116,14 @@ class ModpackImportWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, archive_path, voidex_root, java_executable, instance_directory=None, instance_game_version=None, parent=None):
+    def __init__(self, archive_path, voidex_root, java_executable, instance_directory=None, instance_game_version=None, instance_profile_id=None, parent=None):
         super().__init__(parent)
         self.archive_path = archive_path
         self.voidex_root = voidex_root
         self.java_executable = java_executable
         self.instance_directory = instance_directory
         self.instance_game_version = instance_game_version
+        self.instance_profile_id = instance_profile_id
 
     def run(self):
         try:
@@ -132,6 +133,24 @@ class ModpackImportWorker(QThread):
                 instance_directory=self.instance_directory,
                 instance_game_version=self.instance_game_version,
             )
+            if self.instance_profile_id:
+                loader_key = {
+                    "fabric-loader": "fabric", "forge": "forge",
+                    "neoforge": "neoforge", "quilt-loader": "quilt",
+                    "vanilla": "vanilla",
+                }.get(result.get("loader"))
+                try:
+                    if loader_key is None:
+                        raise ValueError("Modpack uses an unsupported loader identifier.")
+                    update_instance_profile_loader(
+                        Path(self.voidex_root) / "profiles",
+                        self.instance_profile_id,
+                        result["game_version"],
+                        loader_key,
+                    )
+                    result["instance_profile_loader_updated"] = True
+                except (OSError, ValueError) as exc:
+                    result["profile_metadata_warning"] = str(exc)
             self.completed.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -1358,6 +1377,7 @@ class MainWindow(QMainWindow):
         java_executable = self.java_path.text().strip()
         instance_directory = None
         instance_game_version = None
+        instance_profile_id = None
         if self.selected_instance_id:
             try:
                 selected = resolve_instance_profile(
@@ -1366,13 +1386,15 @@ class MainWindow(QMainWindow):
                 )
                 instance_directory = selected["game_directory_path"]
                 instance_game_version = selected["game_version"]
+                instance_profile_id = selected["id"]
             except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "VOIDEX", f"Selected instance is unavailable: {exc}")
                 return
         self.modpack_import_button.setEnabled(False)
         self.modpack_status.setText("Validating modpack and preparing its files...")
         self.modpack_import_worker = ModpackImportWorker(
-            archive_path, Path.home() / ".voidex", java_executable, instance_directory, instance_game_version, self
+            archive_path, Path.home() / ".voidex", java_executable,
+            instance_directory, instance_game_version, instance_profile_id, self
         )
         self.modpack_import_worker.progress.connect(self._modpack_import_progress)
         self.modpack_import_worker.completed.connect(self._modpack_import_completed)
@@ -1416,9 +1438,19 @@ class MainWindow(QMainWindow):
             setattr(self, f"{key}_profile_game_version", game_version)
             self.settings.setValue(f"{key}_profile_id", result["profile_id"])
             self.settings.setValue(f"{key}_profile_game_version", game_version)
+        self.refresh_instance_profiles()
+        metadata_note = ""
+        if result.get("profile_metadata_warning"):
+            metadata_note = (
+                " Profile loader metadata could not be updated: "
+                + result["profile_metadata_warning"]
+            )
+        elif result.get("instance_profile_loader_updated"):
+            metadata_note = " Selected instance loader metadata was updated."
         self.modpack_status.setText(
             f"Imported {result['name']}: Minecraft {game_version}, {result['loader']}, "
             f"{result['files_installed']} files. Open Versions and prepare this game version before launching."
+            + metadata_note
         )
         self.log(
             f"Modpack imported: {result['name']} / Minecraft {game_version} / "
