@@ -54,14 +54,18 @@ python main.py
 python -m unittest discover -s tests -v
 ```
 
-## Build a local preview executable
+## Build a Windows executable
+
+A Windows x64 build is produced automatically by GitHub Actions after every push to `main`, and can also be started manually from the **Actions → Build Windows executable** page. The workflow runs the unit tests, packages the PySide6 application with PyInstaller in one-file/windowed mode, and uploads `VOIDEX.exe` as the `VOIDEX-Windows-x64` artifact for 14 days.
+
+For a local build on Windows:
 
 ```powershell
-pip install pyinstaller
-pyinstaller --noconfirm --windowed --name VOIDEX main.py
+py -m pip install -r requirements.txt pyinstaller
+py -m PyInstaller --noconfirm --clean --onefile --windowed --name VOIDEX --collect-all PySide6 --hidden-import shiboken6 main.py
 ```
 
-The executable will be placed in `dist\\VOIDEX\\` (or `dist\\VOIDEX.exe`, depending on the PyInstaller mode). This command has not been run in CI yet; no prebuilt executable is currently included in the repository.
+The local executable is written to `dist\\VOIDEX.exe`. The GitHub Actions artifact is a build output, not a signed installer; code signing and a dedicated installer remain future work.
 
 ## Performance note
 
