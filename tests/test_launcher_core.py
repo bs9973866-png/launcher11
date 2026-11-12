@@ -20,7 +20,7 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            search_modrinth_mods, fetch_modrinth_compatible_version,
                            download_verified_modrinth_file, list_installed_mods,
                            remove_installed_mod, fetch_fabric_loader_versions, fetch_forge_loader_versions, _download_forge_installer,
-                           install_fabric_loader, merge_fabric_profile_metadata)
+                           install_fabric_loader, merge_fabric_profile_metadata, merge_forge_profile_metadata)
 
 
 def sample_metadata():
@@ -932,6 +932,77 @@ class FabricLoaderTests(unittest.TestCase):
                      "mainClass": "example.Main",
                      "libraries": [{"name": "net.fabricmc:fabric-loader:0.16.10"}]},
                     Path(directory),
+                )
+
+
+class ForgeProfileMergeTests(unittest.TestCase):
+    def test_merges_forge_profile_and_resolves_installed_maven_library(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            relative = Path("net/minecraftforge/fmlcore/1.0/fmlcore-1.0.jar")
+            target = root / relative
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"forge-core")
+            base = {
+                "id": "1.20.1",
+                "mainClass": "net.minecraft.client.main.Main",
+                "libraries": [],
+                "arguments": {"jvm": ["-Dvanilla=true"], "game": ["--demo"]},
+                "javaVersion": {"majorVersion": 17},
+            }
+            profile = {
+                "id": "1.20.1-forge-47.3.0",
+                "inheritsFrom": "1.20.1",
+                "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+                "libraries": [{
+                    "name": "net.minecraftforge:fmlcore:1.0",
+                    "url": "https://maven.minecraftforge.net/",
+                }],
+                "arguments": {"jvm": ["-Dforge=true"], "game": ["--fml.forgeVersion", "47.3.0"]},
+            }
+            merged = merge_forge_profile_metadata(base, profile, root)
+            self.assertEqual(merged["id"], profile["id"])
+            self.assertEqual(merged["mainClass"], profile["mainClass"])
+            self.assertEqual(merged["javaVersion"], {"majorVersion": 17})
+            self.assertEqual(merged["arguments"]["jvm"], ["-Dvanilla=true", "-Dforge=true"])
+            artifact = merged["libraries"][0]["downloads"]["artifact"]
+            self.assertEqual(artifact["path"], relative.as_posix())
+            self.assertEqual(artifact["sha1"], hashlib.sha1(b"forge-core").hexdigest())
+
+    def test_rejects_forge_profile_for_another_game_version(self):
+        with self.assertRaisesRegex(ValueError, "does not inherit"):
+            merge_forge_profile_metadata(
+                {"id": "1.20.1", "libraries": []},
+                {"id": "1.20.1-forge-47.3.0", "inheritsFrom": "1.19.4",
+                 "mainClass": "example.Main", "libraries": []},
+                Path("."),
+            )
+
+    def test_rejects_missing_forge_library(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "library is missing"):
+                merge_forge_profile_metadata(
+                    {"id": "1.20.1", "libraries": []},
+                    {"id": "1.20.1-forge-47.3.0", "inheritsFrom": "1.20.1",
+                     "mainClass": "example.Main",
+                     "libraries": [{"name": "net.minecraftforge:fmlcore:1.0"}]},
+                    Path(directory),
+                )
+
+    def test_rejects_untrusted_forge_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "net/example/demo/1.0/demo-1.0.jar"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"demo")
+            with self.assertRaisesRegex(ValueError, "repository is not trusted"):
+                merge_forge_profile_metadata(
+                    {"id": "1.20.1", "libraries": []},
+                    {"id": "1.20.1-forge-47.3.0", "inheritsFrom": "1.20.1",
+                     "mainClass": "example.Main",
+                     "libraries": [{"name": "net.example:demo:1.0",
+                                    "url": "https://evil.example/"}]},
+                    root,
                 )
 
 
