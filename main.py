@@ -980,12 +980,12 @@ class MainWindow(QMainWindow):
             message = f"Java {result['version']} detected (major {result['major']})."
         elif result["compatible"]:
             message = (
-                f"Java {result['version']} is compatible with the selected version "
-                f"(requires {result['expected_major']}+)."
+                f"Java {result['version']} matches the selected version requirement "
+                f"(requires Java {result['expected_major']} exactly)."
             )
         else:
             message = (
-                f"Java {result['version']} is too old for the selected Minecraft version "
+                f"Java {result['version']} does not match the selected Minecraft version requirement "
                 f"(requires {result['expected_major']}+)."
             )
         self.java_status.setText(message)
