@@ -12,7 +12,9 @@ import os
 import re
 import tempfile
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import stat
+import zipfile
 from urllib.parse import urlparse
 
 MANIFEST_HOST = "piston-meta.mojang.com"
@@ -561,3 +563,141 @@ def resolve_asset_objects(asset_index):
             raise ValueError("Conflicting asset objects share the same content hash.")
         resolved[path] = item
     return [resolved[path] for path in sorted(resolved)]
+
+
+MAX_NATIVE_ARCHIVE_ENTRIES = 20000
+MAX_NATIVE_TOTAL_UNCOMPRESSED = 512 * 1024 * 1024
+MAX_NATIVE_FILE_SIZE = 128 * 1024 * 1024
+
+
+def _validated_native_member_name(name):
+    """Return a safe POSIX archive member path or reject platform-specific escapes."""
+    if not isinstance(name, str) or not name or "\x00" in name or "\\" in name:
+        raise ValueError("Native archive contains an invalid member path.")
+    if name.startswith("/") or name.startswith("//"):
+        raise ValueError("Native archive contains an absolute member path.")
+    normalized = name[:-1] if name.endswith("/") else name
+    parts = normalized.split("/")
+    if (not normalized or any(part in {"", ".", ".."} for part in parts)
+            or ":" in parts[0]):
+        raise ValueError("Native archive member path is unsafe.")
+    relative = PurePosixPath(normalized)
+    if relative.is_absolute():
+        raise ValueError("Native archive contains an absolute member path.")
+    return relative
+
+
+def extract_native_archives(archives, destination,
+                            max_entries=MAX_NATIVE_ARCHIVE_ENTRIES,
+                            max_total_size=MAX_NATIVE_TOTAL_UNCOMPRESSED,
+                            max_file_size=MAX_NATIVE_FILE_SIZE):
+    """Safely extract native JARs, rejecting traversal, links, collisions and zip bombs.
+
+    META-INF entries are omitted. Each file is written to a temporary sibling and
+    atomically replaced only after its uncompressed byte count matches the ZIP header.
+    """
+    if not isinstance(archives, (list, tuple)):
+        raise ValueError("Native archives must be provided as a list.")
+    for limit in (max_entries, max_total_size, max_file_size):
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("Native extraction limits must be positive integers.")
+
+    root = Path(destination)
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    planned = []
+    total_size = 0
+    entry_count = 0
+    seen_files = set()
+
+    # Preflight every archive before writing anything.
+    for archive_path in archives:
+        archive_file = Path(archive_path)
+        if not archive_file.is_file():
+            raise ValueError(f"Native archive does not exist: {archive_file}")
+        try:
+            with zipfile.ZipFile(archive_file, "r") as archive:
+                for info in archive.infolist():
+                    entry_count += 1
+                    if entry_count > max_entries:
+                        raise ValueError("Native archives exceed the entry-count limit.")
+                    name = info.filename
+                    relative = _validated_native_member_name(name)
+                    mode = (info.external_attr >> 16) & 0xFFFF
+                    if stat.S_ISLNK(mode):
+                        raise ValueError("Native archive contains a symbolic link.")
+                    if info.flag_bits & 0x1:
+                        raise ValueError("Encrypted native archive entries are not supported.")
+                    if relative.parts[0].upper() == "META-INF":
+                        continue
+                    if info.is_dir():
+                        continue
+                    if info.file_size < 0 or info.file_size > max_file_size:
+                        raise ValueError("Native archive contains a file above the size limit.")
+                    total_size += info.file_size
+                    if total_size > max_total_size:
+                        raise ValueError("Native archives exceed the total extraction size limit.")
+                    key = relative.as_posix()
+                    if key in seen_files:
+                        raise ValueError("Native archives contain duplicate output paths.")
+                    seen_files.add(key)
+                    planned.append((archive_file, info, relative))
+        except zipfile.BadZipFile as exc:
+            raise ValueError(f"Invalid native archive: {archive_file}") from exc
+
+    # Reject a file that would also need to act as a parent directory.
+    for key in seen_files:
+        parts = PurePosixPath(key).parts
+        if any("/".join(parts[:index]) in seen_files for index in range(1, len(parts))):
+            raise ValueError("Native archive file/directory path collision detected.")
+
+    extracted = []
+    for archive_file, info, relative in planned:
+        target = root.joinpath(*relative.parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        resolved_parent = target.parent.resolve()
+        try:
+            resolved_parent.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Native extraction path escapes its destination.") from exc
+        # Re-resolve after mkdir to detect pre-existing or raced symlink parents.
+        target = resolved_parent / target.name
+        resolved_target = target.resolve()
+        try:
+            resolved_target.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Native extraction target escapes its destination.") from exc
+        if target.is_symlink():
+            raise ValueError("Native extraction refuses to overwrite a symbolic link.")
+
+        temporary_path = None
+        written = 0
+        try:
+            with zipfile.ZipFile(archive_file, "r") as archive:
+                with archive.open(info, "r") as source:
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb", prefix=target.name + ".", suffix=".part",
+                        dir=str(target.parent), delete=False
+                    ) as temporary:
+                        temporary_path = Path(temporary.name)
+                        while True:
+                            chunk = source.read(DOWNLOAD_CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > info.file_size or written > max_file_size:
+                                raise ValueError("Native archive entry expanded beyond its declared size.")
+                            temporary.write(chunk)
+            if written != info.file_size:
+                raise ValueError("Native archive entry size does not match its ZIP metadata.")
+            os.replace(temporary_path, target)
+            temporary_path = None
+            extracted.append(target)
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    return extracted
