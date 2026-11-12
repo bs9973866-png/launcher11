@@ -10,7 +10,7 @@ from pathlib import Path
 
 from launcher_core import (fetch_version_metadata, summarize_version_metadata, download_verified_client,
                             download_verified_version_json, resolve_library_artifacts,
-                            download_verified_libraries)
+                            download_verified_libraries, resolve_asset_objects)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal
 from PySide6.QtWidgets import (
