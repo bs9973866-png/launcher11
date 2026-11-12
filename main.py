@@ -15,7 +15,7 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             discover_java_candidates, validate_java_executable,
                             build_launch_plan, verify_cached_asset_objects)
 
-from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess
+from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QPlainTextEdit, QStackedWidget, QVBoxLayout,
@@ -334,7 +334,7 @@ class LaunchCheckWorker(QThread):
 
             libraries = home / "libraries"
             natives = home / "versions" / self.version_id / "natives"
-            if not natives.is_dir() or not any(natives.iterdir()):
+            if natives.is_symlink() or not natives.is_dir() or not any(natives.iterdir()):
                 raise ValueError("Native libraries are not prepared. Press Prepare natives first.")
 
             asset_ref = metadata.get("assetIndex") or {}
@@ -364,6 +364,8 @@ class LaunchCheckWorker(QThread):
                     + detail
                 )
 
+            game_directory = home / "instances" / self.version_id
+            game_directory.mkdir(parents=True, exist_ok=True)
             auth = {
                 "player_name": self.nickname,
                 "uuid": offline_uuid(self.nickname),
@@ -379,7 +381,7 @@ class LaunchCheckWorker(QThread):
                 client_jar=client,
                 libraries_root=libraries,
                 natives_directory=natives,
-                game_directory=home / "instances" / self.version_id,
+                game_directory=game_directory,
                 assets_root=home / "assets",
                 auth=auth,
                 jvm_arguments=[f"-Xms512M", f"-Xmx{self.ram_mb}M", *self.extra_jvm],
@@ -387,7 +389,6 @@ class LaunchCheckWorker(QThread):
                 launcher_name="VOIDEX",
                 launcher_version="0.3",
             )
-            Path(plan["cwd"]).mkdir(parents=True, exist_ok=True)
             self.ready.emit(plan)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -1229,9 +1230,13 @@ class MainWindow(QMainWindow):
             return
         self.log("Sending terminate signal to Minecraft.")
         process.terminate()
-        if not process.waitForFinished(3000):
-            self.log("Minecraft did not stop gracefully; sending kill signal.")
-            process.kill()
+        QTimer.singleShot(
+            3000,
+            lambda target=process: (
+                self.log("Minecraft did not stop gracefully; sending kill signal."),
+                target.kill()
+            ) if target.state() != QProcess.ProcessState.NotRunning else None
+        )
 
     def _console_page(self):
         page = QWidget()
