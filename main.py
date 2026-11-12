@@ -17,7 +17,7 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             install_temurin_runtime, search_modrinth_mods,
                             fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod,
                             fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata,
-                            fetch_forge_loader_versions, install_forge_loader)
+                            fetch_forge_loader_versions, install_forge_loader, merge_forge_profile_metadata)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -542,10 +542,11 @@ class LaunchCheckWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, version_id, manifest_entry, java_executable, ram_mb,
-                 extra_jvm, account_source, nickname, fabric_profile_id=None, parent=None):
+                 extra_jvm, account_source, nickname, fabric_profile_id=None, forge_profile_id=None, parent=None):
         super().__init__(parent)
         self.version_id = version_id
         self.fabric_profile_id = fabric_profile_id
+        self.forge_profile_id = forge_profile_id
         self.manifest_entry = dict(manifest_entry)
         self.java_executable = java_executable
         self.ram_mb = ram_mb
@@ -580,6 +581,13 @@ class LaunchCheckWorker(QThread):
                 with profile_path.open("r", encoding="utf-8") as stream:
                     fabric_profile = json.load(stream)
                 metadata = merge_fabric_profile_metadata(metadata, fabric_profile, home / "libraries")
+            if self.forge_profile_id:
+                profile_path = home / "versions" / self.forge_profile_id / f"{self.forge_profile_id}.json"
+                if profile_path.is_symlink() or not profile_path.is_file():
+                    raise ValueError("Installed Forge profile is missing. Reinstall Forge from the Mods page.")
+                with profile_path.open("r", encoding="utf-8") as stream:
+                    forge_profile = json.load(stream)
+                metadata = merge_forge_profile_metadata(metadata, forge_profile, home / "libraries")
 
             client = home / "cache" / "clients" / f"{self.version_id}.jar"
             client_ref = (metadata.get("downloads") or {}).get("client") or {}
@@ -1038,7 +1046,7 @@ class MainWindow(QMainWindow):
         self.forge_profile_game_version = result["game_version"]
         self.settings.setValue("forge_profile_id", self.forge_profile_id)
         self.settings.setValue("forge_profile_game_version", self.forge_profile_game_version)
-        self.forge_status.setText(f"Forge profile installed: {self.forge_profile_id}. Launch integration is the next step.")
+        self.forge_status.setText(f"Forge profile installed and ready for launch: {self.forge_profile_id}.")
         self.log(f"Forge profile installed and validated: {self.forge_profile_id}")
 
     def _forge_install_failed(self, error):
@@ -1997,7 +2005,8 @@ class MainWindow(QMainWindow):
             self.selected_version, entry, self.java_path.text().strip(),
             int(self.ram.currentText()), extra_jvm,
             self.account_source.currentText(), self.player_name.text().strip(),
-            self.fabric_profile_id if self.fabric_profile_game_version == self.selected_version else None, self,
+            self.fabric_profile_id if self.fabric_profile_game_version == self.selected_version else None,
+            self.forge_profile_id if self.forge_profile_game_version == self.selected_version else None, self,
         )
         self.launch_worker.ready.connect(self._launch_plan_ready)
         self.launch_worker.failed.connect(self._launch_plan_failed)
