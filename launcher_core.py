@@ -1739,7 +1739,13 @@ def install_modrinth_mrpack(archive_path, voidex_root, java_executable="",
             if resolved.exists():
                 if not resolved.is_file() or resolved.stat().st_size != staged_path.stat().st_size:
                     raise ValueError(f"Modpack would overwrite an existing file: {raw_relative}")
-                if hashlib.sha256(resolved.read_bytes()).digest() != hashlib.sha256(staged_path.read_bytes()).digest():
+                existing_digest = hashlib.sha256()
+                staged_digest = hashlib.sha256()
+                for path, digest in ((resolved, existing_digest), (staged_path, staged_digest)):
+                    with path.open("rb") as stream:
+                        for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
+                            digest.update(chunk)
+                if existing_digest.digest() != staged_digest.digest():
                     raise ValueError(f"Modpack would overwrite an existing file: {raw_relative}")
 
         if loader_name != "vanilla":
