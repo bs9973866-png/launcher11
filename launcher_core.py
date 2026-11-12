@@ -1529,7 +1529,7 @@ def fetch_fabric_loader_versions(game_version, opener=None):
 
 
 FORGE_PROMOTIONS_URL = "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"
-_FORGE_VERSION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?-\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9_.-]+)?$")
+_FORGE_VERSION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9_.-]+)?$")
 
 
 def fetch_forge_loader_versions(game_version, opener=None):
@@ -1560,8 +1560,6 @@ def fetch_forge_loader_versions(game_version, opener=None):
     for suffix, label in (("recommended", "Recommended"), ("latest", "Latest")):
         version = promotions.get(f"{game_version}-{suffix}")
         if not isinstance(version, str) or not _FORGE_VERSION_RE.fullmatch(version):
-            continue
-        if not version.startswith(game_version + "-"):
             continue
         results.append({"version": version, "channel": label})
     if not results:
