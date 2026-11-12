@@ -21,7 +21,8 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             fetch_neoforge_loader_versions, install_neoforge_loader, merge_neoforge_profile_metadata,
                             fetch_quilt_loader_versions, install_quilt_loader, merge_quilt_profile_metadata,
                             install_modrinth_mrpack)
-from instance_profiles import (create_instance_profile, list_instance_profiles, resolve_instance_profile,\n                                rename_instance_profile, delete_instance_profile)
+from instance_profiles import (create_instance_profile, list_instance_profiles, resolve_instance_profile,
+                                rename_instance_profile, delete_instance_profile)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -1018,7 +1019,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Remove instance",
-            f"Remove '{selected['name']}' from the VOIDEX instance list?\\n\\n"
+            f"Remove '{selected['name']}' from the VOIDEX instance list?\n\n"
             "Its game files, worlds, mods and settings will be kept on disk. "
             "Only the profile entry is removed, so this instance will no longer appear in the launcher.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
