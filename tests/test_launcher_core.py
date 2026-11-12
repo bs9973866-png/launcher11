@@ -15,7 +15,9 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            extract_native_archives, discover_java_candidates, validate_java_executable,
                            build_minecraft_classpath, build_launch_plan,
                            verify_cached_asset_objects, safe_extract_temurin_zip,
-                           _fetch_temurin_asset, install_temurin_runtime)
+                           _fetch_temurin_asset, install_temurin_runtime,
+                           search_modrinth_mods, fetch_modrinth_compatible_version,
+                           download_verified_modrinth_file)
 
 
 def sample_metadata():
@@ -682,6 +684,137 @@ class TemurinRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "Windows x64"):
                 install_temurin_runtime(21, directory)
+
+
+
+class ModrinthIntegrationTests(unittest.TestCase):
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self, limit):
+            return self.payload[:limit]
+
+    class JsonOpener:
+        def __init__(self, payload):
+            self.payload = payload
+            self.request = None
+        def open(self, request, timeout):
+            self.request = request
+            return ModrinthIntegrationTests.Response(
+                json.dumps(self.payload).encode("utf-8")
+            )
+
+    def test_search_returns_only_compatible_mod_projects(self):
+        payload = {"hits": [
+            {
+                "project_id": "abc12345", "slug": "sodium", "title": "Sodium",
+                "description": "Rendering optimization", "downloads": 1200,
+                "project_type": "mod", "versions": ["1.21.4"],
+            },
+            {
+                "project_id": "pack1234", "slug": "pack", "title": "A pack",
+                "description": "Not a mod", "downloads": 10,
+                "project_type": "modpack", "versions": ["1.21.4"],
+            },
+            {
+                "project_id": "old12345", "slug": "old", "title": "Old",
+                "description": "Wrong game version", "downloads": 5,
+                "project_type": "mod", "versions": ["1.20.1"],
+            },
+        ]}
+        opener = self.JsonOpener(payload)
+        result = search_modrinth_mods("sodium", "1.21.4", "fabric", opener=opener)
+        self.assertEqual([item["title"] for item in result], ["Sodium"])
+        self.assertIn("api.modrinth.com", opener.request.full_url)
+        self.assertIn("versions%3A1.21.4", opener.request.full_url)
+
+    def test_search_rejects_invalid_game_version_and_loader(self):
+        with self.assertRaisesRegex(ValueError, "concrete Minecraft"):
+            search_modrinth_mods("sodium", "latest-release")
+        with self.assertRaisesRegex(ValueError, "Unsupported mod loader"):
+            search_modrinth_mods("sodium", "1.21.4", "vanilla")
+
+    def test_fetches_matching_version_and_validates_cdn_file(self):
+        payload = [{
+            "id": "version123", "name": "Sodium build",
+            "game_versions": ["1.21.4"], "loaders": ["fabric"],
+            "files": [{
+                "filename": "sodium.jar", "url": "https://cdn.modrinth.com/data/a/sodium.jar",
+                "size": 12, "primary": True,
+                "hashes": {"sha1": "a" * 40},
+            }],
+        }]
+        opener = self.JsonOpener(payload)
+        result = fetch_modrinth_compatible_version(
+            "abc12345", "1.21.4", "fabric", opener=opener
+        )
+        self.assertEqual(result["file"]["filename"], "sodium.jar")
+        self.assertEqual(result["loader"], "fabric")
+        self.assertIn("/v2/project/abc12345/version", opener.request.full_url)
+
+    def test_rejects_untrusted_download_host(self):
+        payload = [{
+            "id": "version123", "name": "Sodium build",
+            "game_versions": ["1.21.4"], "loaders": ["fabric"],
+            "files": [{
+                "filename": "sodium.jar", "url": "https://example.com/sodium.jar",
+                "size": 12, "primary": True,
+                "hashes": {"sha1": "a" * 40},
+            }],
+        }]
+        with self.assertRaisesRegex(ValueError, "No fabric build"):
+            fetch_modrinth_compatible_version(
+                "abc12345", "1.21.4", "fabric", opener=self.JsonOpener(payload)
+            )
+
+    def test_download_verifies_checksum_and_reuses_cache(self):
+        payload = b"mod-jar-bytes"
+        digest = hashlib.sha1(payload).hexdigest()
+        info = {
+            "file": {
+                "filename": "sample-mod.jar",
+                "url": "https://cdn.modrinth.com/data/sample-mod.jar",
+                "size": len(payload), "sha1": digest, "sha512": None,
+            }
+        }
+        class BinaryResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self, limit): return payload
+        class BinaryOpener:
+            def open(self, request, timeout): return BinaryResponse()
+        with tempfile.TemporaryDirectory() as directory:
+            target = download_verified_modrinth_file(
+                info, directory, opener=BinaryOpener()
+            )
+            self.assertEqual(target.read_bytes(), payload)
+            reused = download_verified_modrinth_file(info, directory)
+            self.assertEqual(reused, target)
+
+    def test_rejects_mod_checksum_mismatch_without_installing_file(self):
+        payload = b"mod-jar-bytes"
+        info = {
+            "file": {
+                "filename": "sample-mod.jar",
+                "url": "https://cdn.modrinth.com/data/sample-mod.jar",
+                "size": len(payload), "sha1": "0" * 40, "sha512": None,
+            }
+        }
+        class BinaryResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self, limit): return payload
+        class BinaryOpener:
+            def open(self, request, timeout): return BinaryResponse()
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "SHA-1 verification"):
+                download_verified_modrinth_file(info, directory, opener=BinaryOpener())
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
 
 
 
