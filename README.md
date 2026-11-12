@@ -24,14 +24,14 @@ A lightweight, customizable Minecraft Java launcher for Windows, built with Pyth
 
 This is an active preview, not a finished launcher. The following are not connected yet:
 
-- Actual Java process creation and lifecycle monitoring. The launch-plan builder validates and assembles arguments but does not start Minecraft; cached assets also still need runtime-specific legacy/virtual asset handling and a full install-readiness check.
+- Automatic installation orchestration, full virtual/legacy asset materialization for older releases, and authenticated Ely.by/Microsoft sessions. The current launch preflight verifies the selected version JSON, client JAR, library hashes, asset index and all asset objects, native directory, and Java major before starting a Java process. Offline profiles can launch with a local nickname; online account providers remain blocked until their authentication flows are implemented.
 - Ely.by and Microsoft authentication.
 - Online skin lookup, skin upload and 3D skin preview.
 - Modrinth / CurseForge downloads and mod-loader installation.
-- Streaming Minecraft process output into the console.
+- Streaming Minecraft stdout/stderr into the Console page, process exit/error reporting, and a non-blocking Stop Minecraft action.
 - Signed Windows installer and portable package.
 
-The Launch button intentionally reports that launching is not ready instead of pretending a game was started. The metadata inspector, client-JAR cache and library cache are preparatory stages, not a complete installer. Ely.by and Microsoft UUIDs are not fabricated.
+The Launch button now performs a background preflight and starts a real Java process only when required files pass integrity checks. It currently supports explicit offline nickname sessions only; Ely.by and Microsoft authentication are not fabricated or bypassed. The player must first inspect the version and install/cache its client JAR, libraries, assets and natives using the preparation actions.
 
 ## Requirements
 
