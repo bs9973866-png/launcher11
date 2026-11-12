@@ -115,12 +115,13 @@ class ModpackImportWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, archive_path, voidex_root, java_executable, instance_directory=None, parent=None):
+    def __init__(self, archive_path, voidex_root, java_executable, instance_directory=None, instance_game_version=None, parent=None):
         super().__init__(parent)
         self.archive_path = archive_path
         self.voidex_root = voidex_root
         self.java_executable = java_executable
         self.instance_directory = instance_directory
+        self.instance_game_version = instance_game_version
 
     def run(self):
         try:
@@ -128,6 +129,7 @@ class ModpackImportWorker(QThread):
                 self.archive_path, self.voidex_root, self.java_executable,
                 progress_callback=lambda done, total: self.progress.emit(done, total),
                 instance_directory=self.instance_directory,
+                instance_game_version=self.instance_game_version,
             )
             self.completed.emit(result)
         except Exception as exc:
@@ -1252,6 +1254,7 @@ class MainWindow(QMainWindow):
             return
         java_executable = self.java_path.text().strip()
         instance_directory = None
+        instance_game_version = None
         if self.selected_instance_id:
             try:
                 selected = resolve_instance_profile(
@@ -1259,13 +1262,14 @@ class MainWindow(QMainWindow):
                     str(self.selected_instance_id),
                 )
                 instance_directory = selected["game_directory_path"]
+                instance_game_version = selected["game_version"]
             except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "VOIDEX", f"Selected instance is unavailable: {exc}")
                 return
         self.modpack_import_button.setEnabled(False)
         self.modpack_status.setText("Validating modpack and preparing its files...")
         self.modpack_import_worker = ModpackImportWorker(
-            archive_path, Path.home() / ".voidex", java_executable, instance_directory, self
+            archive_path, Path.home() / ".voidex", java_executable, instance_directory, instance_game_version, self
         )
         self.modpack_import_worker.progress.connect(self._modpack_import_progress)
         self.modpack_import_worker.completed.connect(self._modpack_import_completed)
