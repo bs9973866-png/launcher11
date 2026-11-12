@@ -1481,6 +1481,10 @@ def fetch_modrinth_compatible_version(project_id, game_version, loader="fabric",
     raise ValueError(f"No {loader} build of this mod is available for Minecraft {game_version}.")
 
 
+QUILT_META_HOST = "meta.quiltmc.org"
+QUILT_MAVEN_HOST = "maven.quiltmc.org"
+MAX_QUILT_INSTALLER_BYTES = 100 * 1024 * 1024
+
 FABRIC_META_HOST = "meta.fabricmc.net"
 FABRIC_MAVEN_HOST = "maven.fabricmc.net"
 MAX_FABRIC_INSTALLER_BYTES = 50 * 1024 * 1024
@@ -1500,6 +1504,206 @@ def _fabric_json(path, opener=None):
         raise ValueError("Fabric metadata response is too large.")
     payload = json.loads(raw.decode("utf-8"))
     return payload
+
+
+def _quilt_json(path, opener=None):
+    parsed = urlparse("https://" + QUILT_META_HOST + path)
+    if parsed.scheme != "https" or parsed.hostname != QUILT_META_HOST:
+        raise ValueError("Quilt metadata URL is not trusted.")
+    request = urllib.request.Request(
+        parsed.geturl(), headers={"User-Agent": "VOIDEX-Launcher/0.9"}
+    )
+    opener = opener or urllib.request.build_opener(
+        SameHostLibraryRedirectHandler(QUILT_META_HOST)
+    )
+    with opener.open(request, timeout=25) as response:
+        raw = response.read(8 * 1024 * 1024 + 1)
+    if len(raw) > 8 * 1024 * 1024:
+        raise ValueError("Quilt metadata response is too large.")
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Quilt returned invalid metadata JSON.") from exc
+
+
+def fetch_quilt_loader_versions(game_version, opener=None):
+    """Return Quilt loader builds supported by one concrete Minecraft release."""
+    if not isinstance(game_version, str) or not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", game_version):
+        raise ValueError("Choose a concrete Minecraft release for Quilt.")
+    payload = _quilt_json(
+        "/v3/versions/loader/" + quote(game_version, safe=""), opener=opener
+    )
+    if not isinstance(payload, list):
+        raise ValueError("Quilt returned an invalid loader version list.")
+    results = []
+    for entry in payload[:100]:
+        loader = entry.get("loader") if isinstance(entry, dict) and isinstance(entry.get("loader"), dict) else entry
+        version = loader.get("version") if isinstance(loader, dict) else None
+        stable = loader.get("stable", True) if isinstance(loader, dict) else False
+        if (isinstance(version, str) and len(version) <= 64
+                and re.fullmatch(r"[0-9A-Za-z.+_-]+", version)
+                and isinstance(stable, bool)):
+            results.append({"version": version, "stable": stable})
+    if not results:
+        raise ValueError(f"Quilt has no compatible loader builds for Minecraft {game_version}.")
+    results.sort(key=lambda item: not item["stable"])
+    return results
+
+
+def fetch_quilt_installer_versions(opener=None):
+    """Return validated Quilt installer versions, stable builds first."""
+    payload = _quilt_json("/v3/versions/installer", opener=opener)
+    if not isinstance(payload, list):
+        raise ValueError("Quilt returned an invalid installer version list.")
+    results = []
+    for entry in payload[:100]:
+        version = entry.get("version") if isinstance(entry, dict) else None
+        stable = entry.get("stable", False) if isinstance(entry, dict) else False
+        if (isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?", version)
+                and isinstance(stable, bool)):
+            results.append({"version": version, "stable": stable})
+    results.sort(key=lambda item: not item["stable"])
+    if not results:
+        raise ValueError("Quilt did not publish a usable installer version.")
+    return results
+
+
+def _download_quilt_installer(version, destination, opener=None, progress_callback=None):
+    if not isinstance(version, str) or not re.fullmatch(
+            r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?", version):
+        raise ValueError("Quilt installer version is invalid.")
+    root = Path(destination).expanduser()
+    if root.is_symlink():
+        raise ValueError("Quilt installer cache must not be a symbolic link.")
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    filename = f"quilt-installer-{version}.jar"
+    url = f"https://{QUILT_MAVEN_HOST}/repository/release/org/quiltmc/quilt-installer/{version}/{filename}"
+    opener = opener or urllib.request.build_opener(
+        SameHostLibraryRedirectHandler(QUILT_MAVEN_HOST)
+    )
+    headers = {"User-Agent": "VOIDEX-Launcher/0.9"}
+    with opener.open(urllib.request.Request(url + ".sha1", headers=headers), timeout=25) as response:
+        checksum = response.read(256).decode("ascii", errors="strict").strip().split()[0]
+    if not _SHA1_RE.fullmatch(checksum):
+        raise ValueError("Quilt installer SHA-1 metadata is invalid.")
+    target = root / filename
+    if target.is_symlink():
+        raise ValueError("Refusing to overwrite a symbolic-link Quilt installer.")
+
+    def valid(path):
+        if not path.is_file() or not 0 < path.stat().st_size <= MAX_QUILT_INSTALLER_BYTES:
+            return False
+        digest = hashlib.sha1()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == checksum.lower()
+
+    if valid(target):
+        if progress_callback:
+            progress_callback(target.stat().st_size, target.stat().st_size)
+        return target
+    temporary = None
+    digest = hashlib.sha1()
+    received = 0
+    try:
+        with opener.open(urllib.request.Request(url, headers=headers), timeout=45) as response:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=filename + ".", suffix=".part",
+                dir=str(root), delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                while True:
+                    chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    received += len(chunk)
+                    if received > MAX_QUILT_INSTALLER_BYTES:
+                        raise ValueError("Quilt installer exceeds the allowed download size.")
+                    stream.write(chunk)
+                    digest.update(chunk)
+                    if progress_callback:
+                        progress_callback(received, 0)
+        if received == 0 or digest.hexdigest() != checksum.lower():
+            raise ValueError("Quilt installer SHA-1 verification failed.")
+        os.replace(temporary, target)
+        temporary = None
+        return target
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def install_quilt_loader(game_version, loader_version, java_executable, voidex_root,
+                         progress_callback=None, opener=None, runner=None):
+    """Run the official Quilt client installer and validate its generated profile."""
+    if not isinstance(game_version, str) or not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", game_version):
+        raise ValueError("Minecraft version is invalid.")
+    java = Path(java_executable).expanduser()
+    if java.is_symlink() or not java.is_file():
+        raise ValueError("Select a valid Java executable before installing Quilt.")
+    java = Path(validate_java_executable(java)["path"])
+    root = Path(voidex_root).expanduser()
+    if root.is_symlink():
+        raise ValueError("VOIDEX data directory must not be a symbolic link.")
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    loader_versions = fetch_quilt_loader_versions(game_version, opener=opener)
+    if loader_version not in {item["version"] for item in loader_versions}:
+        raise ValueError("The selected Quilt loader build is not available for this Minecraft version.")
+    installer_versions = fetch_quilt_installer_versions(opener=opener)
+    installer_version = next((item["version"] for item in installer_versions if item["stable"]), None)
+    if not installer_version:
+        raise ValueError("Quilt did not provide a stable installer release.")
+    if progress_callback:
+        progress_callback("Downloading official Quilt installer")
+    installer = _download_quilt_installer(
+        installer_version, root / "cache" / "installers", opener=opener
+    )
+    if progress_callback:
+        progress_callback("Installing Quilt client profile")
+    command = [
+        str(java.resolve()), "-jar", str(installer), "install", "client",
+        game_version, loader_version, f'--install-dir="{root}"', "--no-profile",
+    ]
+    execute = runner or subprocess.run
+    try:
+        completed = execute(
+            command, cwd=str(root), capture_output=True, text=True,
+            timeout=900, check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Quilt installer timed out after 15 minutes.") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "No installer output").strip()
+        raise ValueError("Quilt installer failed: " + detail[-1800:])
+    profile_id = f"quilt-loader-{loader_version}-{game_version}"
+    versions_root = root / "versions"
+    if versions_root.is_symlink() or not versions_root.is_dir():
+        raise ValueError("Quilt installer did not create a versions directory.")
+    folder = versions_root / profile_id
+    profile_path = folder / f"{profile_id}.json"
+    if (folder.is_symlink() or not folder.is_dir()
+            or profile_path.is_symlink() or not profile_path.is_file()):
+        raise ValueError("Quilt installer did not create the expected client profile.")
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("Quilt installer created an invalid launch profile.") from exc
+    if (not isinstance(profile, dict) or profile.get("id") != profile_id
+            or profile.get("inheritsFrom") != game_version
+            or not isinstance(profile.get("mainClass"), str)
+            or not isinstance(profile.get("libraries"), list)):
+        raise ValueError("Quilt installer profile does not match the selected game and loader.")
+    return {
+        "game_version": game_version, "loader_version": loader_version,
+        "installer_version": installer_version, "profile_id": profile_id,
+        "profile_path": str(profile_path), "output": (completed.stdout or "")[-2000:],
+    }
 
 
 def fetch_fabric_loader_versions(game_version, opener=None):
@@ -1719,6 +1923,104 @@ def install_fabric_loader(game_version, loader_version, java_executable, voidex_
         "installer_version": installer_version,
         "output": (completed.stdout or "")[-2000:],
     }
+
+
+def merge_quilt_profile_metadata(base_metadata, profile, libraries_root):
+    """Merge Quilt launch metadata and require every added library to be installed safely."""
+    if not isinstance(base_metadata, dict) or not isinstance(profile, dict):
+        raise ValueError("Invalid Minecraft or Quilt profile metadata.")
+    base_id = base_metadata.get("id")
+    if not isinstance(base_id, str) or profile.get("inheritsFrom") != base_id:
+        raise ValueError("Quilt profile does not inherit from the selected Minecraft version.")
+    profile_id = profile.get("id")
+    if (not isinstance(profile_id, str)
+            or not re.fullmatch(r"quilt-loader-[A-Za-z0-9.+_-]+-" + re.escape(base_id), profile_id)):
+        raise ValueError("Quilt profile ID is invalid for the selected Minecraft version.")
+    main_class = profile.get("mainClass")
+    if not isinstance(main_class, str) or not main_class.strip():
+        raise ValueError("Quilt profile has no client main class.")
+    root = Path(libraries_root).expanduser()
+    if root.is_symlink():
+        raise ValueError("Quilt libraries directory must not be a symbolic link.")
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    base_libraries = base_metadata.get("libraries", [])
+    profile_libraries = profile.get("libraries", [])
+    if not isinstance(base_libraries, list) or not isinstance(profile_libraries, list):
+        raise ValueError("Minecraft or Quilt library metadata is invalid.")
+    merged = dict(base_metadata)
+    by_name = {}
+    for item in base_libraries:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ValueError("Minecraft profile contains an invalid library entry.")
+        by_name[item["name"]] = dict(item)
+    trusted_hosts = {
+        QUILT_MAVEN_HOST, "libraries.minecraft.net",
+        "repo.maven.apache.org", "repo1.maven.org",
+    }
+    for raw in profile_libraries:
+        if not isinstance(raw, dict) or not isinstance(raw.get("name"), str):
+            raise ValueError("Quilt profile contains an invalid library entry.")
+        item = dict(raw)
+        parts = item["name"].split("@", 1)
+        coordinate = parts[0].split(":")
+        extension = parts[1] if len(parts) == 2 else "jar"
+        if len(coordinate) not in (3, 4) or not all(coordinate[:3]):
+            raise ValueError(f"Unsupported Quilt Maven coordinate: {item['name']}")
+        group, artifact_name, version = coordinate[:3]
+        classifier = coordinate[3] if len(coordinate) == 4 else None
+        if (not re.fullmatch(r"[A-Za-z0-9_.-]+", group)
+                or not re.fullmatch(r"[A-Za-z0-9_.-]+", artifact_name)
+                or not re.fullmatch(r"[A-Za-z0-9_.+-]+", version)
+                or not re.fullmatch(r"[A-Za-z0-9_.-]+", extension)
+                or (classifier and not re.fullmatch(r"[A-Za-z0-9_.-]+", classifier))):
+            raise ValueError("Quilt Maven coordinate contains unsafe characters.")
+        filename = f"{artifact_name}-{version}" + (f"-{classifier}" if classifier else "") + f".{extension}"
+        relative = Path(*group.split(".")) / artifact_name / version / filename
+        candidate = root / relative
+        current = candidate
+        while current != root:
+            if current.is_symlink():
+                raise ValueError("Quilt library path contains a symbolic link.")
+            current = current.parent
+        candidate = candidate.resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Quilt library path escapes the libraries directory.") from exc
+        if not candidate.is_file():
+            raise ValueError(f"Quilt library is missing; reinstall the loader: {relative.as_posix()}")
+        repository = item.get("url") or f"https://{QUILT_MAVEN_HOST}/repository/release/"
+        parsed = urlparse(repository)
+        if (parsed.scheme != "https" or parsed.hostname not in trusted_hosts
+                or parsed.username is not None or parsed.password is not None):
+            raise ValueError("Quilt library repository is not trusted.")
+        digest = hashlib.sha1()
+        with candidate.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
+                digest.update(chunk)
+        item["downloads"] = {"artifact": {
+            "path": relative.as_posix(),
+            "url": repository.rstrip("/") + "/" + relative.as_posix(),
+            "sha1": digest.hexdigest(), "size": candidate.stat().st_size,
+        }}
+        by_name[item["name"]] = item
+    merged["id"] = profile_id
+    merged["inheritsFrom"] = base_id
+    merged["mainClass"] = main_class
+    merged["libraries"] = list(by_name.values())
+    base_arguments = base_metadata.get("arguments")
+    profile_arguments = profile.get("arguments")
+    if isinstance(base_arguments, dict) or isinstance(profile_arguments, dict):
+        result = {}
+        for key in ("jvm", "game"):
+            base_values = (base_arguments or {}).get(key, []) if isinstance(base_arguments, dict) else []
+            profile_values = (profile_arguments or {}).get(key, []) if isinstance(profile_arguments, dict) else []
+            if not isinstance(base_values, list) or not isinstance(profile_values, list):
+                raise ValueError("Quilt launch arguments are invalid.")
+            result[key] = list(base_values) + list(profile_values)
+        merged["arguments"] = result
+    return merged
 
 
 def merge_fabric_profile_metadata(base_metadata, profile, libraries_root):
