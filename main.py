@@ -22,7 +22,8 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             fetch_quilt_loader_versions, install_quilt_loader, merge_quilt_profile_metadata,
                             install_modrinth_mrpack)
 from instance_profiles import (create_instance_profile, list_instance_profiles, resolve_instance_profile,
-                                rename_instance_profile, delete_instance_profile, update_instance_profile_loader,\n                                set_instance_profile_loader_profile)
+                                rename_instance_profile, delete_instance_profile, update_instance_profile_loader,
+                                set_instance_profile_loader_profile)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
