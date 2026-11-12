@@ -514,7 +514,17 @@ class NativeArchiveExtractionTests(unittest.TestCase):
                 extract_native_archives([archive], output)
             self.assertFalse((Path(directory) / "escape.dll").exists())
 
-    def test_rejects_absolute_drive_and_backslash_paths(self):,        for member in ("/rooted.dll", "C:/Windows/evil.dll", "folder\\\\evil.dll"):,            with self.subTest(member=member), tempfile.TemporaryDirectory() as directory:,                if "\\\\" in member:,                    with self.assertRaises(ValueError):,                        _validated_native_member_name(member),                else:,                    archive = self.make_archive(directory, [(member, b"bad")]),                    with self.assertRaises(ValueError):,                        extract_native_archives([archive], Path(directory) / "out")
+    def test_rejects_absolute_drive_and_backslash_paths(self):
+        for member in ("/rooted.dll", "C:/Windows/evil.dll", "folder\\evil.dll"):
+            with self.subTest(member=member), tempfile.TemporaryDirectory() as directory:
+                if "\\" in member:
+                    with self.assertRaises(ValueError):
+                        _validated_native_member_name(member)
+                else:
+                    archive = self.make_archive(directory, [(member, b"bad")])
+                    with self.assertRaises(ValueError):
+                        extract_native_archives([archive], Path(directory) / "out")
+
     def test_rejects_symlink_entries(self):
         with tempfile.TemporaryDirectory() as directory:
             link = zipfile.ZipInfo("native-link")
