@@ -1764,6 +1764,12 @@ class MainWindow(QMainWindow):
         if not java_executable:
             self.forge_status.setText("Set a valid Java executable in Settings first.")
             return
+        if game_version != self.selected_version:
+            QMessageBox.information(
+                self, "VOIDEX",
+                "The Mods page version must match the active instance version."
+            )
+            return
         self.forge_target_instance_id = self.selected_instance_id or None
         self.forge_install_button.setEnabled(False)
         self.forge_versions_button.setEnabled(False)
