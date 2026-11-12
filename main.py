@@ -17,7 +17,7 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             install_temurin_runtime, search_modrinth_mods,
                             fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod,
                             fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata,
-                            fetch_forge_loader_versions)
+                            fetch_forge_loader_versions, install_forge_loader)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -133,6 +133,30 @@ class ForgeVersionsWorker(QThread):
     def run(self):
         try:
             self.loaded.emit(fetch_forge_loader_versions(self.game_version))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+
+class ForgeInstallWorker(QThread):
+    stage = Signal(str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, game_version, loader_version, java_executable, voidex_root, parent=None):
+        super().__init__(parent)
+        self.game_version = game_version
+        self.loader_version = loader_version
+        self.java_executable = java_executable
+        self.voidex_root = voidex_root
+
+    def run(self):
+        try:
+            result = install_forge_loader(
+                self.game_version, self.loader_version, self.java_executable,
+                self.voidex_root, progress_callback=self.stage.emit,
+            )
+            self.completed.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -661,6 +685,9 @@ class MainWindow(QMainWindow):
         self.minecraft_process = None
         self.fabric_versions_worker = None
         self.forge_versions_worker = None
+        self.forge_install_worker = None
+        self.forge_profile_id = self.settings.value("forge_profile_id", "")
+        self.forge_profile_game_version = self.settings.value("forge_profile_game_version", "")
         self.fabric_install_worker = None
         self.fabric_profile_id = self.settings.value("fabric_profile_id", "")
         self.fabric_profile_game_version = self.settings.value("fabric_profile_game_version", "")
@@ -842,6 +869,23 @@ class MainWindow(QMainWindow):
         fabric_row.addWidget(self.fabric_install_button)
         layout.addLayout(fabric_row)
         layout.addWidget(self.fabric_status)
+
+        forge_row = QHBoxLayout()
+        self.forge_loader_version = QComboBox()
+        self.forge_loader_version.setMinimumWidth(150)
+        self.forge_versions_button = QPushButton("Load Forge builds")
+        self.forge_versions_button.clicked.connect(self.load_forge_versions)
+        self.forge_install_button = QPushButton("Install Forge")
+        self.forge_install_button.clicked.connect(self.install_selected_forge)
+        self.forge_status = QLabel("Forge installer downloads are verified before execution.")
+        self.forge_status.setObjectName("Muted")
+        self.forge_status.setWordWrap(True)
+        forge_row.addWidget(QLabel("Forge build"))
+        forge_row.addWidget(self.forge_loader_version)
+        forge_row.addWidget(self.forge_versions_button)
+        forge_row.addWidget(self.forge_install_button)
+        layout.addLayout(forge_row)
+        layout.addWidget(self.forge_status)
         self.modrinth_search_button = QPushButton("Search Modrinth")
         self.modrinth_search_button.clicked.connect(self.search_modrinth)
         controls.addWidget(self.modrinth_search, 2)
@@ -959,6 +1003,52 @@ class MainWindow(QMainWindow):
     def _forge_versions_finished(self):
         self.forge_versions_button.setEnabled(True)
         self.forge_versions_worker = None
+
+
+    def install_selected_forge(self):
+        if self.forge_install_worker and self.forge_install_worker.isRunning():
+            return
+        game_version = self.modrinth_game_version.text().strip()
+        loader_version = self.forge_loader_version.currentData()
+        java_executable = self.java_path.text().strip()
+        if not loader_version:
+            self.forge_status.setText("Load and select a Forge build first.")
+            return
+        if not java_executable:
+            self.forge_status.setText("Set a valid Java executable in Settings first.")
+            return
+        self.forge_install_button.setEnabled(False)
+        self.forge_versions_button.setEnabled(False)
+        self.forge_status.setText("Preparing official Forge installer...")
+        self.log(f"Starting Forge {loader_version} installation for Minecraft {game_version}.")
+        self.forge_install_worker = ForgeInstallWorker(
+            game_version, loader_version, java_executable, Path.home() / ".voidex", self
+        )
+        self.forge_install_worker.stage.connect(self._forge_install_stage)
+        self.forge_install_worker.completed.connect(self._forge_install_completed)
+        self.forge_install_worker.failed.connect(self._forge_install_failed)
+        self.forge_install_worker.finished.connect(self._forge_install_finished)
+        self.forge_install_worker.start()
+
+    def _forge_install_stage(self, stage):
+        self.forge_status.setText(stage)
+
+    def _forge_install_completed(self, result):
+        self.forge_profile_id = result["profile_id"]
+        self.forge_profile_game_version = result["game_version"]
+        self.settings.setValue("forge_profile_id", self.forge_profile_id)
+        self.settings.setValue("forge_profile_game_version", self.forge_profile_game_version)
+        self.forge_status.setText(f"Forge profile installed: {self.forge_profile_id}. Launch integration is the next step.")
+        self.log(f"Forge profile installed and validated: {self.forge_profile_id}")
+
+    def _forge_install_failed(self, error):
+        self.forge_status.setText(f"Forge installation failed: {error}")
+        self.log(f"Forge installation failed: {error}")
+
+    def _forge_install_finished(self):
+        self.forge_install_button.setEnabled(True)
+        self.forge_versions_button.setEnabled(True)
+        self.forge_install_worker = None
 
     def install_selected_fabric(self):
         if self.fabric_install_worker and self.fabric_install_worker.isRunning():
