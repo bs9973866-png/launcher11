@@ -19,13 +19,14 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata,
                             fetch_forge_loader_versions, install_forge_loader, merge_forge_profile_metadata,
                             fetch_neoforge_loader_versions, install_neoforge_loader, merge_neoforge_profile_metadata,
-                            fetch_quilt_loader_versions, install_quilt_loader, merge_quilt_profile_metadata)
+                            fetch_quilt_loader_versions, install_quilt_loader, merge_quilt_profile_metadata,
+                            install_modrinth_mrpack)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QPlainTextEdit, QStackedWidget, QVBoxLayout,
-    QWidget, QFormLayout, QTableWidget, QTableWidgetItem, QMessageBox
+    QWidget, QFormLayout, QTableWidget, QTableWidgetItem, QMessageBox, QFileDialog
 )
 
 
@@ -104,6 +105,28 @@ class ModrinthInstallWorker(QThread):
                 progress_callback=lambda done, total: self.progress.emit(done, total),
             )
             self.completed.emit(str(path), version["version_name"])
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ModpackImportWorker(QThread):
+    progress = Signal(int, int)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, archive_path, voidex_root, java_executable, parent=None):
+        super().__init__(parent)
+        self.archive_path = archive_path
+        self.voidex_root = voidex_root
+        self.java_executable = java_executable
+
+    def run(self):
+        try:
+            result = install_modrinth_mrpack(
+                self.archive_path, self.voidex_root, self.java_executable,
+                progress_callback=lambda done, total: self.progress.emit(done, total),
+            )
+            self.completed.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -805,6 +828,7 @@ class MainWindow(QMainWindow):
         self.neoforge_install_worker = None
         self.quilt_versions_worker = None
         self.quilt_install_worker = None
+        self.modpack_import_worker = None
         self.quilt_profile_id = self.settings.value("quilt_profile_id", "")
         self.quilt_profile_game_version = self.settings.value("quilt_profile_game_version", "")
         self.neoforge_profile_id = self.settings.value("neoforge_profile_id", "")
@@ -1044,7 +1068,17 @@ class MainWindow(QMainWindow):
         layout.addLayout(quilt_row)
         layout.addWidget(self.quilt_status)
 
-        self.modrinth_search_button = QPushButton("Search Modrinth")
+        modpack_row = QHBoxLayout()
+        self.modpack_import_button = QPushButton("Import .mrpack modpack")
+        self.modpack_import_button.clicked.connect(self.import_modpack)
+        self.modpack_status = QLabel("Import a Modrinth .mrpack to the selected Minecraft-version instance.")
+        self.modpack_status.setObjectName("Muted")
+        self.modpack_status.setWordWrap(True)
+        modpack_row.addWidget(self.modpack_import_button)
+        modpack_row.addWidget(self.modpack_status, 1)
+        layout.addLayout(modpack_row)
+
+                self.modrinth_search_button = QPushButton("Search Modrinth")
         self.modrinth_search_button.clicked.connect(self.search_modrinth)
         controls.addWidget(self.modrinth_search, 2)
         controls.addWidget(self.modrinth_game_version)
@@ -1100,6 +1134,81 @@ class MainWindow(QMainWindow):
         warning.setWordWrap(True)
         layout.addWidget(warning)
         return page
+
+
+    def import_modpack(self):
+        if self.modpack_import_worker and self.modpack_import_worker.isRunning():
+            return
+        archive_path, _ = QFileDialog.getOpenFileName(
+            self, "Import Modrinth modpack", "", "Modrinth modpacks (*.mrpack)"
+        )
+        if not archive_path:
+            return
+        java_executable = self.java_path.text().strip()
+        self.modpack_import_button.setEnabled(False)
+        self.modpack_status.setText("Validating modpack and preparing its files...")
+        self.modpack_import_worker = ModpackImportWorker(
+            archive_path, Path.home() / ".voidex", java_executable, self
+        )
+        self.modpack_import_worker.progress.connect(self._modpack_import_progress)
+        self.modpack_import_worker.completed.connect(self._modpack_import_completed)
+        self.modpack_import_worker.failed.connect(self._modpack_import_failed)
+        self.modpack_import_worker.finished.connect(self._modpack_import_finished)
+        self.modpack_import_worker.start()
+        self.log(f"Importing Modrinth modpack: {archive_path}")
+
+    def _modpack_import_progress(self, completed, total):
+        if total > 0:
+            self.modpack_status.setText(
+                f"Downloading modpack files: {completed / (1024 * 1024):.1f} / {total / (1024 * 1024):.1f} MiB"
+            )
+
+    def _modpack_import_completed(self, result):
+        game_version = result["game_version"]
+        self.modrinth_game_version.setText(game_version)
+        self.selected_version = game_version
+        self.selected_metadata = None
+        self.selected_metadata_version = None
+        self.settings.setValue("selected_version", game_version)
+        if hasattr(self, "home_version"):
+            self.home_version.setText(f"Selected version: {game_version}")
+        for key in ("fabric", "forge", "neoforge", "quilt"):
+            self.settings.setValue(f"{key}_profile_id", "")
+            self.settings.setValue(f"{key}_profile_game_version", "")
+        self.fabric_profile_id = ""
+        self.fabric_profile_game_version = ""
+        self.forge_profile_id = ""
+        self.forge_profile_game_version = ""
+        self.neoforge_profile_id = ""
+        self.neoforge_profile_game_version = ""
+        self.quilt_profile_id = ""
+        self.quilt_profile_game_version = ""
+        if result["profile_id"]:
+            key = {
+                "fabric-loader": "fabric", "forge": "forge",
+                "neoforge": "neoforge", "quilt-loader": "quilt",
+            }[result["loader"]]
+            setattr(self, f"{key}_profile_id", result["profile_id"])
+            setattr(self, f"{key}_profile_game_version", game_version)
+            self.settings.setValue(f"{key}_profile_id", result["profile_id"])
+            self.settings.setValue(f"{key}_profile_game_version", game_version)
+        self.modpack_status.setText(
+            f"Imported {result['name']}: Minecraft {game_version}, {result['loader']}, "
+            f"{result['files_installed']} files. Open Versions and prepare this game version before launching."
+        )
+        self.log(
+            f"Modpack imported: {result['name']} / Minecraft {game_version} / "
+            f"{result['loader']} / {result['files_installed']} files."
+        )
+        self.refresh_installed_mods()
+
+    def _modpack_import_failed(self, error):
+        self.modpack_status.setText(f"Modpack import failed: {error}")
+        self.log(f"Modpack import failed: {error}")
+
+    def _modpack_import_finished(self):
+        self.modpack_import_button.setEnabled(True)
+        self.modpack_import_worker = None
 
 
     def load_fabric_versions(self):
