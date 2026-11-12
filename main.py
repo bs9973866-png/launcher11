@@ -15,7 +15,8 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             discover_java_candidates, validate_java_executable,
                             build_launch_plan, verify_cached_asset_objects,
                             install_temurin_runtime, search_modrinth_mods,
-                            fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod)
+                            fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod,
+                            fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -100,6 +101,44 @@ class ModrinthInstallWorker(QThread):
                 progress_callback=lambda done, total: self.progress.emit(done, total),
             )
             self.completed.emit(str(path), version["version_name"])
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class FabricVersionsWorker(QThread):
+    loaded = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, game_version, parent=None):
+        super().__init__(parent)
+        self.game_version = game_version
+
+    def run(self):
+        try:
+            self.loaded.emit(fetch_fabric_loader_versions(self.game_version))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class FabricInstallWorker(QThread):
+    stage = Signal(str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, game_version, loader_version, java_executable, voidex_root, parent=None):
+        super().__init__(parent)
+        self.game_version = game_version
+        self.loader_version = loader_version
+        self.java_executable = java_executable
+        self.voidex_root = voidex_root
+
+    def run(self):
+        try:
+            result = install_fabric_loader(
+                self.game_version, self.loader_version, self.java_executable,
+                self.voidex_root, progress_callback=self.stage.emit,
+            )
+            self.completed.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
 
