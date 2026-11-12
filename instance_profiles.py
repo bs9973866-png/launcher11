@@ -204,7 +204,7 @@ def update_instance_profile_loader(root, profile_id, expected_game_version, load
     try:
         with temporary.open("x", encoding="utf-8") as stream:
             json.dump(data, stream, ensure_ascii=False, indent=2)
-            stream.write("\\n")
+            stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, metadata)
