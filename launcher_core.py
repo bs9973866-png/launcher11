@@ -796,6 +796,6 @@ def validate_java_executable(executable, expected_major=None, timeout=5):
         raise ValueError("Java reported an invalid major version.")
     return {
         "path": str(path.resolve()), "version": version_text, "major": major,
-        "compatible": expected_major is None or major >= expected_major,
+        "compatible": expected_major is None or major == expected_major,
         "expected_major": expected_major,
     }
