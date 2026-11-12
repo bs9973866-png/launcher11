@@ -1348,6 +1348,56 @@ class ModrinthMrpackImportTests(unittest.TestCase):
                 install_modrinth_mrpack(archive_path, root / "voidex")
 
 
+    def test_imports_into_selected_named_instance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            voidex = root / "voidex"
+            profile_game = voidex / "profiles" / ("a" * 32) / "game"
+            profile_game.mkdir(parents=True)
+            archive = self._archive(
+                root, self._manifest(), {"config/profile.json": b"isolated"}
+            )
+            result = install_modrinth_mrpack(
+                archive, voidex, instance_directory=profile_game,
+                instance_game_version="1.21.1",
+            )
+            self.assertEqual(
+                (profile_game / "config/profile.json").read_bytes(), b"isolated"
+            )
+            self.assertFalse((voidex / "instances" / "1.21.1").exists())
+            self.assertEqual(result["instance_directory"], str(profile_game.resolve()))
+
+    def test_rejects_named_instance_version_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            voidex = root / "voidex"
+            profile_game = voidex / "profiles" / ("b" * 32) / "game"
+            profile_game.mkdir(parents=True)
+            archive = self._archive(
+                root, self._manifest(), {"options.txt": b"pack"}
+            )
+            with self.assertRaisesRegex(ValueError, "requires 1.21.1"):
+                install_modrinth_mrpack(
+                    archive, voidex, instance_directory=profile_game,
+                    instance_game_version="1.21.4",
+                )
+            self.assertFalse((profile_game / "options.txt").exists())
+
+    def test_rejects_named_instance_outside_profiles_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            voidex = root / "voidex"
+            outside = root / "outside"
+            outside.mkdir()
+            archive = self._archive(root, self._manifest(), {"options.txt": b"pack"})
+            with self.assertRaisesRegex(ValueError, "inside VOIDEX profiles"):
+                install_modrinth_mrpack(
+                    archive, voidex, instance_directory=outside,
+                    instance_game_version="1.21.1",
+                )
+            self.assertFalse((outside / "options.txt").exists())
+
+
 class QuiltCatalogTests(unittest.TestCase):
     class Response:
         def __init__(self, payload):
