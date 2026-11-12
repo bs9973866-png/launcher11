@@ -801,6 +801,232 @@ def validate_java_executable(executable, expected_major=None, timeout=5):
     }
 
 
+# Official Eclipse Temurin runtime installer (Windows x64).
+TEMURIN_API_HOST = "api.adoptium.net"
+TEMURIN_DOWNLOAD_HOSTS = {
+    "github.com", "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com", "github-releases.githubusercontent.com",
+}
+MAX_TEMURIN_METADATA_BYTES = 4 * 1024 * 1024
+MAX_TEMURIN_ARCHIVE_BYTES = 700 * 1024 * 1024
+MAX_TEMURIN_ENTRIES = 100000
+MAX_TEMURIN_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
+
+
+class TemurinRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Allow Temurin archives to redirect only to known GitHub release hosts."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlparse(newurl)
+        if (parsed.scheme != "https" or parsed.hostname not in TEMURIN_DOWNLOAD_HOSTS
+                or parsed.username is not None or parsed.password is not None):
+            raise ValueError("Temurin download redirected to an untrusted host.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _fetch_temurin_asset(expected_major, opener=None):
+    if (not isinstance(expected_major, int) or isinstance(expected_major, bool)
+            or expected_major < 8 or expected_major > 99):
+        raise ValueError("Unsupported Java major version requested.")
+    url = (
+        f"https://{TEMURIN_API_HOST}/v3/assets/latest/{expected_major}/hotspot"
+        "?architecture=x64&image_type=jdk&os=windows&vendor=eclipse"
+    )
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname != TEMURIN_API_HOST:
+        raise ValueError("Temurin metadata URL is not trusted.")
+    request = urllib.request.Request(url, headers={"User-Agent": "VOIDEX-Launcher/0.5"})
+    if opener is None:
+        opener = urllib.request.build_opener()
+    with opener.open(request, timeout=25) as response:
+        payload = response.read(MAX_TEMURIN_METADATA_BYTES + 1)
+    if len(payload) > MAX_TEMURIN_METADATA_BYTES:
+        raise ValueError("Temurin metadata response is unexpectedly large.")
+    try:
+        assets = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Temurin returned invalid release metadata.") from exc
+    if not isinstance(assets, list) or not assets:
+        raise ValueError(f"Eclipse Temurin has no Windows x64 JDK for Java {expected_major}.")
+    for release in assets:
+        binaries = release.get("binaries", []) if isinstance(release, dict) else []
+        for binary in binaries:
+            if not isinstance(binary, dict):
+                continue
+            package = binary.get("package")
+            version = binary.get("version") or {}
+            if (binary.get("os") != "windows" or binary.get("architecture") != "x64"
+                    or binary.get("image_type") != "jdk" or not isinstance(package, dict)):
+                continue
+            link = package.get("link")
+            parsed_link = urlparse(link if isinstance(link, str) else "")
+            checksum = package.get("checksum")
+            size = package.get("size")
+            name = package.get("name")
+            if (parsed_link.scheme != "https" or parsed_link.hostname != "github.com"
+                    or parsed_link.username is not None or parsed_link.password is not None):
+                continue
+            if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", checksum):
+                continue
+            if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= MAX_TEMURIN_ARCHIVE_BYTES:
+                continue
+            if not isinstance(name, str) or not name.lower().endswith(".zip") or Path(name).name != name:
+                continue
+            major = version.get("major") if isinstance(version, dict) else None
+            if major is not None and major != expected_major:
+                continue
+            return {"url": link, "sha256": checksum.lower(), "size": size, "name": name}
+    raise ValueError("Temurin metadata did not contain a valid Windows x64 JDK ZIP package.")
+
+
+def safe_extract_temurin_zip(archive_path, destination):
+    """Extract a Temurin ZIP while rejecting traversal, links and resource bombs."""
+    archive_file = Path(archive_path)
+    if archive_file.is_symlink() or not archive_file.is_file():
+        raise ValueError("Temurin archive is missing or unsafe.")
+    root = Path(destination).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    seen = set()
+    total_size = 0
+    extracted = []
+    with zipfile.ZipFile(archive_file, "r") as archive:
+        infos = archive.infolist()
+        if not infos or len(infos) > MAX_TEMURIN_ENTRIES:
+            raise ValueError("Temurin archive has an invalid entry count.")
+        for info in infos:
+            raw_name = info.filename
+            if not isinstance(raw_name, str) or not raw_name or "\\" in raw_name:
+                raise ValueError("Temurin archive contains an invalid path.")
+            relative = PurePosixPath(raw_name)
+            if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+                raise ValueError("Temurin archive path traversal was rejected.")
+            if relative.parts and ":" in relative.parts[0]:
+                raise ValueError("Temurin archive contains a drive-qualified path.")
+            mode = (info.external_attr >> 16) & 0xFFFF
+            if stat.S_ISLNK(mode):
+                raise ValueError("Temurin archive contains a symbolic link.")
+            if info.flag_bits & 0x1:
+                raise ValueError("Encrypted Temurin archive entries are not supported.")
+            if info.is_dir():
+                continue
+            if info.file_size < 0 or info.file_size > 1024 * 1024 * 1024:
+                raise ValueError("Temurin archive contains an oversized file.")
+            total_size += info.file_size
+            if total_size > MAX_TEMURIN_EXTRACTED_BYTES:
+                raise ValueError("Temurin archive exceeds the extraction size limit.")
+            key = relative.as_posix().casefold()
+            if key in seen:
+                raise ValueError("Temurin archive contains duplicate output paths.")
+            seen.add(key)
+            target = root.joinpath(*relative.parts)
+            resolved = target.resolve()
+            try:
+                resolved.relative_to(root)
+            except ValueError as exc:
+                raise ValueError("Temurin extraction path escapes its destination.") from exc
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_symlink():
+                raise ValueError("Temurin extraction refuses to overwrite a symbolic link.")
+            temporary_path = None
+            written = 0
+            try:
+                with archive.open(info, "r") as source:
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb", prefix=target.name + ".", suffix=".part",
+                        dir=str(target.parent), delete=False
+                    ) as temporary:
+                        temporary_path = Path(temporary.name)
+                        while True:
+                            chunk = source.read(DOWNLOAD_CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > info.file_size:
+                                raise ValueError("Temurin archive entry expanded beyond its declared size.")
+                            temporary.write(chunk)
+                if written != info.file_size:
+                    raise ValueError("Temurin archive entry size does not match its ZIP metadata.")
+                os.replace(temporary_path, target)
+                temporary_path = None
+                extracted.append(target)
+            finally:
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+    java_files = [path for path in extracted if path.name.lower() == "java.exe"
+                  and path.parent.name.lower() == "bin"]
+    if len(java_files) != 1:
+        raise ValueError("Temurin archive must contain exactly one bin/java.exe runtime.")
+    return java_files[0]
+
+
+def install_temurin_runtime(expected_major, runtimes_root, progress_callback=None,
+                            metadata_opener=None, download_opener=None):
+    """Download, SHA-256 verify, safely extract and validate an official Temurin JDK."""
+    if os.name != "nt":
+        raise ValueError("Automatic Temurin installation currently supports Windows x64 only.")
+    runtime_root = Path(runtimes_root).expanduser().resolve()
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    target_home = runtime_root / f"temurin-{expected_major}-windows-x64"
+    target_java = target_home / "bin" / "java.exe"
+    if target_java.is_file() and not target_java.is_symlink():
+        try:
+            return validate_java_executable(target_java, expected_major)["path"]
+        except ValueError:
+            shutil.rmtree(target_home, ignore_errors=True)
+
+    asset = _fetch_temurin_asset(expected_major, opener=metadata_opener)
+    request = urllib.request.Request(
+        asset["url"], headers={"User-Agent": "VOIDEX-Launcher/0.5"}
+    )
+    if download_opener is None:
+        download_opener = urllib.request.build_opener(TemurinRedirectHandler())
+    with tempfile.TemporaryDirectory(prefix="voidex-temurin-", dir=str(runtime_root)) as temporary:
+        work = Path(temporary)
+        archive_path = work / asset["name"]
+        digest = hashlib.sha256()
+        downloaded = 0
+        try:
+            with download_opener.open(request, timeout=45) as response:
+                with archive_path.open("wb") as output:
+                    while True:
+                        chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        downloaded += len(chunk)
+                        if downloaded > asset["size"] or downloaded > MAX_TEMURIN_ARCHIVE_BYTES:
+                            raise ValueError("Temurin archive is larger than its published size.")
+                        output.write(chunk)
+                        digest.update(chunk)
+                        if progress_callback:
+                            progress_callback(downloaded, asset["size"], "Temurin archive")
+        except Exception:
+            raise
+        if downloaded != asset["size"]:
+            raise ValueError(
+                f"Incomplete Temurin archive: expected {asset['size']} bytes, received {downloaded}."
+            )
+        if digest.hexdigest() != asset["sha256"]:
+            raise ValueError("Temurin archive SHA-256 verification failed.")
+        extracted_root = work / "extracted"
+        java_path = safe_extract_temurin_zip(archive_path, extracted_root)
+        java_home = java_path.parent.parent
+        if not java_home.is_dir() or java_path.is_symlink():
+            raise ValueError("Extracted Temurin runtime layout is invalid.")
+        if target_home.exists():
+            if target_home.is_symlink():
+                raise ValueError("Refusing to replace a symbolic-link Java runtime directory.")
+            shutil.rmtree(target_home)
+        os.replace(java_home, target_home)
+    installed_java = target_home / "bin" / "java.exe"
+    validation = validate_java_executable(installed_java, expected_major)
+    if progress_callback:
+        progress_callback(asset["size"], asset["size"], "Java runtime verified")
+    return validation["path"]
+
+
 # Minecraft launch-plan construction. This stage creates a validated argv list only;
 # it deliberately does not spawn a process.
 import shlex
