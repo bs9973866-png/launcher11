@@ -174,5 +174,34 @@ class InstanceProfileTests(unittest.TestCase):
                 list_instance_profiles(root)
 
 
+    def test_mods_directory_is_isolated_per_named_instance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "profiles"
+            first = create_instance_profile(root, "PvP", "1.21.8")
+            second = create_instance_profile(root, "Survival", "1.21.8")
+
+            first_mods = resolve_instance_mods_directory(root, first["id"], "1.21.8")
+            second_mods = resolve_instance_mods_directory(root, second["id"], "1.21.8")
+            self.assertNotEqual(first_mods, second_mods)
+            self.assertEqual(first_mods, Path(first["game_directory_path"]) / "mods")
+            self.assertEqual(second_mods, Path(second["game_directory_path"]) / "mods")
+            with self.assertRaisesRegex(ValueError, "not selected version"):
+                resolve_instance_mods_directory(root, first["id"], "1.20.1")
+
+    def test_mods_directory_rejects_symbolic_link(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "profiles"
+            profile = create_instance_profile(root, "Unsafe", "1.21.8")
+            game = Path(profile["game_directory_path"])
+            target = Path(temp) / "outside"
+            target.mkdir()
+            try:
+                (game / "mods").symlink_to(target, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("Directory symlinks are unavailable on this platform")
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                resolve_instance_mods_directory(root, profile["id"], "1.21.8")
+
+
 if __name__ == "__main__":
     unittest.main()
