@@ -1529,7 +1529,7 @@ def fetch_fabric_loader_versions(game_version, opener=None):
 
 
 FORGE_PROMOTIONS_URL = "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"
-_FORGE_VERSION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9_.-]+)?$")
+_FORGE_VERSION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
 
 
 def fetch_forge_loader_versions(game_version, opener=None):
