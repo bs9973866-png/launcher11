@@ -2104,6 +2104,12 @@ class MainWindow(QMainWindow):
             for col, value in enumerate(values):
                 self.version_table.setItem(row, col, QTableWidgetItem(value))
         self.version_table.resizeColumnsToContents()
+        if self.selected_instance_id:
+            for row in range(self.version_table.rowCount()):
+                item = self.version_table.item(row, 0)
+                if item and item.text() == str(self.selected_version):
+                    self.version_table.selectRow(row)
+                    break
 
     def inspect_selected_version(self):
         row = self.version_table.currentRow()
