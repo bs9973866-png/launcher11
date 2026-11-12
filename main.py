@@ -1948,8 +1948,14 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        directory = Path.home() / ".voidex" / "instances" / version / "mods"
         try:
+            if self.selected_instance_id:
+                directory = resolve_instance_mods_directory(
+                    Path.home() / ".voidex" / "profiles",
+                    str(self.selected_instance_id), version,
+                )
+            else:
+                directory = Path.home() / ".voidex" / "instances" / version / "mods"
             remove_installed_mod(directory, filename)
         except (OSError, ValueError) as exc:
             self.modrinth_status.setText(f"Could not remove mod: {exc}")
