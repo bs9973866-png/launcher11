@@ -1526,6 +1526,49 @@ def fetch_fabric_loader_versions(game_version, opener=None):
     return results
 
 
+
+
+FORGE_PROMOTIONS_URL = "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"
+_FORGE_VERSION_RE = re.compile(r"^\\d+\\.\\d+(?:\\.\\d+)?-\\d+\\.\\d+(?:\\.\\d+)?(?:-[A-Za-z0-9_.-]+)?$")
+
+
+def fetch_forge_loader_versions(game_version, opener=None):
+    """Return Forge's official recommended/latest builds for one Minecraft release."""
+    if not isinstance(game_version, str) or not re.fullmatch(r"\\d+\\.\\d+(?:\\.\\d+)?", game_version):
+        raise ValueError("Choose a concrete Minecraft release for Forge.")
+    parsed = urlparse(FORGE_PROMOTIONS_URL)
+    if parsed.scheme != "https" or parsed.hostname != "files.minecraftforge.net":
+        raise ValueError("Forge promotions URL is not trusted.")
+    request = urllib.request.Request(
+        FORGE_PROMOTIONS_URL, headers={"User-Agent": "VOIDEX-Launcher/0.8"}
+    )
+    opener = opener or urllib.request.build_opener(
+        SameHostLibraryRedirectHandler("files.minecraftforge.net")
+    )
+    with opener.open(request, timeout=25) as response:
+        raw = response.read(2 * 1024 * 1024 + 1)
+    if len(raw) > 2 * 1024 * 1024:
+        raise ValueError("Forge promotions response is too large.")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Forge returned invalid promotions metadata.") from exc
+    promotions = payload.get("promos") if isinstance(payload, dict) else None
+    if not isinstance(promotions, dict):
+        raise ValueError("Forge promotions metadata has no promotions map.")
+    results = []
+    for suffix, label in (("recommended", "Recommended"), ("latest", "Latest")):
+        version = promotions.get(f"{game_version}-{suffix}")
+        if not isinstance(version, str) or not _FORGE_VERSION_RE.fullmatch(version):
+            continue
+        if not version.startswith(game_version + "-"):
+            continue
+        results.append({"version": version, "channel": label})
+    if not results:
+        raise ValueError(f"Forge has no published recommended/latest build for Minecraft {game_version}.")
+    return results
+
+
 def _download_fabric_installer(version, destination, opener=None, progress_callback=None):
     if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise ValueError("Fabric installer version is invalid.")
