@@ -530,3 +530,34 @@ def download_verified_libraries(artifacts, libraries_root, progress_callback=Non
         if progress_callback:
             progress_callback(completed, total, item["path"])
     return results
+
+ASSET_DOWNLOAD_HOST = "resources.download.minecraft.net"
+
+def resolve_asset_objects(asset_index):
+    """Resolve legacy and modern asset-index objects to safe Mojang object downloads."""
+    if not isinstance(asset_index, dict):
+        raise ValueError("Asset index must be a JSON object.")
+    objects = asset_index.get("objects")
+    if not isinstance(objects, dict):
+        raise ValueError("Asset index has no valid objects map.")
+    resolved = {}
+    for logical_name, metadata in objects.items():
+        if not isinstance(logical_name, str) or not logical_name:
+            raise ValueError("Asset index contains an invalid logical asset name.")
+        if not isinstance(metadata, dict):
+            raise ValueError("Asset index contains invalid object metadata.")
+        digest = metadata.get("hash")
+        if not isinstance(digest, str) or not _SHA1_RE.fullmatch(digest):
+            raise ValueError("Asset index contains an invalid object hash.")
+        digest = digest.lower()
+        size = metadata.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            raise ValueError("Asset index contains an invalid object size.")
+        path = f"{digest[:2]}/{digest}"
+        url = f"https://{ASSET_DOWNLOAD_HOST}/{digest[:2]}/{digest}"
+        item = {"path": path, "url": url, "sha1": digest, "size": size, "source": "asset"}
+        previous = resolved.get(path)
+        if previous is not None and previous != item:
+            raise ValueError("Conflicting asset objects share the same content hash.")
+        resolved[path] = item
+    return [resolved[path] for path in sorted(resolved)]
