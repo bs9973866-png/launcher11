@@ -14,7 +14,8 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata,
                            extract_native_archives, discover_java_candidates, validate_java_executable,
                            build_minecraft_classpath, build_launch_plan,
-                           verify_cached_asset_objects)
+                           verify_cached_asset_objects, safe_extract_temurin_zip,
+                           _fetch_temurin_asset, install_temurin_runtime)
 
 
 def sample_metadata():
@@ -617,6 +618,71 @@ class JavaDiscoveryTests(unittest.TestCase):
             with patch("launcher_core.subprocess.run", return_value=completed):
                 with self.assertRaisesRegex(ValueError, "recognizable"):
                     validate_java_executable(java)
+
+
+class TemurinRuntimeTests(unittest.TestCase):
+    def make_zip(self, directory, entries):
+        archive_path = Path(directory) / "temurin.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            for name, payload in entries:
+                archive.writestr(name, payload)
+        return archive_path
+
+    def test_extracts_java_runtime_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = self.make_zip(directory, [
+                ("jdk-test/bin/java.exe", b"java-binary"),
+                ("jdk-test/release", b"JAVA_VERSION=21"),
+            ])
+            java = safe_extract_temurin_zip(archive, Path(directory) / "out")
+            self.assertEqual(java.relative_to(Path(directory) / "out").as_posix(),
+                             "jdk-test/bin/java.exe")
+            self.assertEqual(java.read_bytes(), b"java-binary")
+
+    def test_rejects_zip_slip_and_cleans_partial_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = self.make_zip(directory, [
+                ("jdk-test/bin/java.exe", b"java"),
+                ("../escape.txt", b"nope"),
+            ])
+            output = Path(directory) / "out"
+            with self.assertRaisesRegex(ValueError, "traversal"):
+                safe_extract_temurin_zip(archive, output)
+            self.assertFalse((Path(directory) / "escape.txt").exists())
+
+    def test_rejects_archive_without_java_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = self.make_zip(directory, [("jdk-test/readme.txt", b"not java")])
+            with self.assertRaisesRegex(ValueError, "java.exe"):
+                safe_extract_temurin_zip(archive, Path(directory) / "out")
+
+    def test_rejects_non_zip_package_metadata(self):
+        payload = [{
+            "binaries": [{
+                "os": "windows", "architecture": "x64", "image_type": "jdk",
+                "version": {"major": 21},
+                "package": {
+                    "link": "https://example.com/temurin.zip",
+                    "checksum": "a" * 64, "size": 100, "name": "temurin.zip"
+                }
+            }]
+        }]
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self, limit): return json.dumps(payload).encode("utf-8")
+        class Opener:
+            def open(self, request, timeout): return Response()
+        with self.assertRaisesRegex(ValueError, "valid Windows x64"):
+            _fetch_temurin_asset(21, opener=Opener())
+
+    def test_runtime_installer_is_windows_only_on_this_platform(self):
+        if os.name == "nt":
+            self.skipTest("Windows platform")
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "Windows x64"):
+                install_temurin_runtime(21, directory)
+
 
 
 class LaunchPlanTests(unittest.TestCase):
