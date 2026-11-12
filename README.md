@@ -21,7 +21,7 @@ A lightweight, customizable Minecraft Java launcher for Windows, built with Pyth
 
 This is an active preview, not a finished launcher. The following are not connected yet:
 
-- Remaining full Minecraft installation work: Java executable discovery/validation, native archive extraction, building the classpath and game arguments, and launching/monitoring the game process. Library and asset actions cache verified files but do not yet create a playable installation or launch Minecraft.
+- Remaining full Minecraft installation work: Java executable discovery/validation, connecting the tested native extraction helper to the install workflow, building the classpath and game arguments, and launching/monitoring the game process. Library and asset actions cache verified files but do not yet create a playable installation or launch Minecraft.
 - Ely.by and Microsoft authentication.
 - Online skin lookup, skin upload and 3D skin preview.
 - Modrinth / CurseForge downloads and mod-loader installation.
