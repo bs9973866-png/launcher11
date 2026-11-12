@@ -799,3 +799,245 @@ def validate_java_executable(executable, expected_major=None, timeout=5):
         "compatible": expected_major is None or major == expected_major,
         "expected_major": expected_major,
     }
+
+
+# Minecraft launch-plan construction. This stage creates a validated argv list only;
+# it deliberately does not spawn a process.
+import shlex
+import sys
+
+
+def _runtime_platform():
+    if sys.platform.startswith("win"):
+        return "windows", "x86_64" if sys.maxsize > 2**32 else "x86"
+    if sys.platform == "darwin":
+        machine = __import__("platform").machine().lower()
+        return "osx", "arm64" if machine in {"arm64", "aarch64"} else "x86_64"
+    machine = __import__("platform").machine().lower()
+    return "linux", "arm64" if machine in {"arm64", "aarch64"} else ("x86" if sys.maxsize <= 2**32 else "x86_64")
+
+
+def _launch_rule_matches(rule, os_name, arch, features):
+    if not isinstance(rule, dict):
+        return False
+    os_rule = rule.get("os") or {}
+    if not isinstance(os_rule, dict):
+        return False
+    if os_rule.get("name") and os_rule["name"] != os_name:
+        return False
+    if os_rule.get("arch"):
+        aliases = {"x86_64": "amd64", "x86": "x86"}
+        if os_rule["arch"] not in {arch, aliases.get(arch)}:
+            return False
+    rule_features = rule.get("features") or {}
+    if not isinstance(rule_features, dict):
+        return False
+    return all(isinstance(value, bool) and features.get(key, False) == value
+               for key, value in rule_features.items())
+
+
+def _launch_rules_allow(rules, os_name, arch, features):
+    if rules is None:
+        return True
+    if not isinstance(rules, list):
+        raise ValueError("Minecraft argument rules must be a list.")
+    allowed = False
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("action") not in {"allow", "disallow"}:
+            raise ValueError("Minecraft argument metadata contains an invalid rule.")
+        if _launch_rule_matches(rule, os_name, arch, features):
+            allowed = rule["action"] == "allow"
+    return allowed
+
+
+def _expand_launch_argument(value, placeholders):
+    if not isinstance(value, str):
+        raise ValueError("Minecraft launch arguments must be strings.")
+    pattern = re.compile(r"\\$\\{([^}]+)\\}")
+    expanded = pattern.sub(
+        lambda match: str(placeholders[match.group(1)])
+        if match.group(1) in placeholders else match.group(0),
+        value,
+    )
+    unresolved = re.findall(r"\\$\\{([^}]+)\\}", expanded)
+    if unresolved:
+        raise ValueError("Unresolved Minecraft launch placeholder(s): " + ", ".join(sorted(set(unresolved))))
+    return expanded
+
+
+def _collect_argument_values(entries, os_name, arch, features, placeholders):
+    if not isinstance(entries, list):
+        raise ValueError("Minecraft argument entries must be a list.")
+    result = []
+    for entry in entries:
+        if isinstance(entry, str):
+            result.append(_expand_launch_argument(entry, placeholders))
+            continue
+        if not isinstance(entry, dict):
+            raise ValueError("Minecraft argument entry has an unsupported format.")
+        if not _launch_rules_allow(entry.get("rules"), os_name, arch, features):
+            continue
+        value = entry.get("value")
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            result.append(_expand_launch_argument(item, placeholders))
+    return result
+
+
+def build_minecraft_classpath(version_metadata, client_jar, libraries_root,
+                              os_name=None, arch=None, features=None,
+                              path_separator=None):
+    """Build a verified classpath from present, platform-compatible artifact JARs."""
+    if not isinstance(version_metadata, dict):
+        raise ValueError("Invalid Minecraft version metadata.")
+    if not (os_name and arch):
+        os_name, arch = _runtime_platform()
+    if os_name not in _LIBRARY_OS_NAMES or arch not in _LIBRARY_ARCHES:
+        raise ValueError("Unsupported target platform for Minecraft classpath.")
+    library_root = Path(libraries_root).resolve()
+    artifacts = resolve_library_artifacts(
+        version_metadata, os_name=os_name, arch=arch, features=features or {}
+    )
+    classpath_items = []
+    for artifact in artifacts:
+        if artifact["source"] == "native":
+            continue
+        relative = Path(artifact["path"])
+        candidate = (library_root / relative).resolve()
+        try:
+            candidate.relative_to(library_root)
+        except ValueError as exc:
+            raise ValueError("Library classpath path escapes the libraries directory.") from exc
+        if candidate.is_symlink() or not candidate.is_file():
+            raise ValueError(f"Required Minecraft library is missing: {artifact['path']}")
+        classpath_items.append(str(candidate))
+
+    client = Path(client_jar).resolve()
+    if not client.is_file():
+        raise ValueError("Minecraft client JAR is missing.")
+    if client.is_symlink():
+        raise ValueError("Minecraft client JAR must not be a symbolic link.")
+    classpath_items.append(str(client))
+    separator = path_separator if path_separator is not None else (";" if os_name == "windows" else ":")
+    if separator not in {";", ":"}:
+        raise ValueError("Invalid classpath separator.")
+    return separator.join(classpath_items)
+
+
+def build_launch_plan(version_metadata, *, java_executable, client_jar,
+                      libraries_root, natives_directory, game_directory,
+                      assets_root, auth, java_validation=None, jvm_arguments=None,
+                      resolution=(1280, 720), version_type="release",
+                      launcher_name="VOIDEX", launcher_version="0.1",
+                      os_name=None, arch=None, features=None):
+    """Return a validated process argv/cwd plan; never executes Java.
+
+    Auth must explicitly provide player_name, uuid, access_token and user_type.
+    Offline callers pass their chosen offline token explicitly.
+    """
+    if not isinstance(version_metadata, dict):
+        raise ValueError("Invalid Minecraft version metadata.")
+    main_class = version_metadata.get("mainClass")
+    if not isinstance(main_class, str) or not main_class.strip():
+        raise ValueError("Minecraft version metadata has no mainClass.")
+    required_auth = ("player_name", "uuid", "access_token", "user_type")
+    if not isinstance(auth, dict) or any(not isinstance(auth.get(key), str) or not auth[key]
+                                         for key in required_auth):
+        raise ValueError("Account session is incomplete; authenticate or provide an explicit offline session.")
+
+    java_major = (version_metadata.get("javaVersion") or {}).get("majorVersion")
+    validation = java_validation or validate_java_executable(java_executable, java_major)
+    if not validation.get("compatible", False):
+        raise ValueError(f"Selected Java runtime does not match required Java {java_major}.")
+    java_path = Path(validation.get("path", java_executable)).expanduser().resolve()
+    if not java_path.is_file():
+        raise ValueError("Validated Java executable is no longer available.")
+
+    if not (os_name and arch):
+        os_name, arch = _runtime_platform()
+    feature_flags = dict(features or {})
+    feature_flags.setdefault("is_demo_user", False)
+    feature_flags.setdefault("has_custom_resolution", True)
+
+    client_path = Path(client_jar).expanduser().resolve()
+    libraries_path = Path(libraries_root).expanduser().resolve()
+    natives_path = Path(natives_directory).expanduser().resolve()
+    game_path = Path(game_directory).expanduser().resolve()
+    assets_path = Path(assets_root).expanduser().resolve()
+    for directory, label in ((natives_path, "Native library directory"),
+                             (game_path, "Game directory"), (assets_path, "Assets directory")):
+        if not directory.is_dir():
+            raise ValueError(f"{label} does not exist: {directory}")
+
+    classpath = build_minecraft_classpath(
+        version_metadata, client_path, libraries_path,
+        os_name=os_name, arch=arch, features=feature_flags,
+    )
+    asset_index = version_metadata.get("assetIndex") or {}
+    asset_index_name = asset_index.get("id") if isinstance(asset_index, dict) else None
+    if not asset_index_name:
+        asset_index_name = "legacy"
+
+    width, height = resolution
+    if not all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in (width, height)):
+        raise ValueError("Resolution width and height must be positive integers.")
+    placeholders = {
+        "auth_player_name": auth["player_name"],
+        "version_name": str(version_metadata.get("id") or ""),
+        "game_directory": str(game_path),
+        "assets_root": str(assets_path),
+        "assets_index_name": str(asset_index_name),
+        "auth_uuid": auth["uuid"].replace("-", ""),
+        "auth_access_token": auth["access_token"],
+        "user_type": auth["user_type"],
+        "version_type": str(version_type),
+        "natives_directory": str(natives_path),
+        "launcher_name": launcher_name,
+        "launcher_version": launcher_version,
+        "classpath": classpath,
+        "classpath_separator": ";" if os_name == "windows" else ":",
+        "library_directory": str(libraries_path),
+        "resolution_width": str(width),
+        "resolution_height": str(height),
+    }
+    for optional_key in ("clientid", "auth_xuid"):
+        if isinstance(auth.get(optional_key), str) and auth[optional_key]:
+            placeholders[optional_key] = auth[optional_key]
+
+    arguments = version_metadata.get("arguments")
+    if isinstance(arguments, dict):
+        jvm_args = _collect_argument_values(
+            arguments.get("jvm", []), os_name, arch, feature_flags, placeholders
+        )
+        game_args = _collect_argument_values(
+            arguments.get("game", []), os_name, arch, feature_flags, placeholders
+        )
+    else:
+        legacy = version_metadata.get("minecraftArguments")
+        if not isinstance(legacy, str) or not legacy.strip():
+            raise ValueError("Minecraft metadata contains neither modern nor legacy game arguments.")
+        try:
+            legacy_tokens = shlex.split(legacy, posix=(os_name != "windows"))
+        except ValueError as exc:
+            raise ValueError(f"Could not parse legacy Minecraft arguments: {exc}") from exc
+        game_args = [_expand_launch_argument(token, placeholders) for token in legacy_tokens]
+        jvm_args = []
+
+    extra_jvm = jvm_arguments or []
+    if not isinstance(extra_jvm, (list, tuple)) or any(not isinstance(arg, str) for arg in extra_jvm):
+        raise ValueError("Additional JVM arguments must be a list of strings.")
+    jvm_args.extend(extra_jvm)
+    jvm_args.extend([f"-Djava.library.path={natives_path}", "-cp", classpath])
+    argv = [str(java_path), *jvm_args, main_class, *game_args]
+    return {
+        "argv": argv,
+        "cwd": str(game_path),
+        "java": str(java_path),
+        "main_class": main_class,
+        "classpath": classpath,
+        "jvm_arguments": jvm_args,
+        "game_arguments": game_args,
+        "natives_directory": str(natives_path),
+        "assets_root": str(assets_path),
+        "assets_index_name": str(asset_index_name),
+    }
