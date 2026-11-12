@@ -1027,7 +1027,10 @@ def build_launch_plan(version_metadata, *, java_executable, client_jar,
     if not isinstance(extra_jvm, (list, tuple)) or any(not isinstance(arg, str) for arg in extra_jvm):
         raise ValueError("Additional JVM arguments must be a list of strings.")
     jvm_args.extend(extra_jvm)
-    jvm_args.extend([f"-Djava.library.path={natives_path}", "-cp", classpath])
+    if not any(arg.startswith("-Djava.library.path=") for arg in jvm_args):
+        jvm_args.append(f"-Djava.library.path={natives_path}")
+    if not any(arg in {"-cp", "-classpath"} for arg in jvm_args):
+        jvm_args.extend(["-cp", classpath])
     argv = [str(java_path), *jvm_args, main_class, *game_args]
     return {
         "argv": argv,
