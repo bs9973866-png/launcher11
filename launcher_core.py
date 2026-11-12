@@ -1803,6 +1803,152 @@ def merge_fabric_profile_metadata(base_metadata, profile, libraries_root):
     return merged
 
 
+
+
+MAX_FORGE_INSTALLER_BYTES = 100 * 1024 * 1024
+FORGE_MAVEN_HOST = "maven.minecraftforge.net"
+
+
+def _download_forge_installer(game_version, forge_version, destination, opener=None,
+                              progress_callback=None):
+    if (not isinstance(game_version, str) or not re.fullmatch(r"\\d+\\.\\d+(?:\\.\\d+)?", game_version)
+            or not isinstance(forge_version, str) or not _FORGE_VERSION_RE.fullmatch(forge_version)):
+        raise ValueError("Forge installer version is invalid.")
+    root = Path(destination).expanduser()
+    if root.is_symlink():
+        raise ValueError("Forge installer cache must not be a symbolic link.")
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    artifact_version = f"{game_version}-{forge_version}"
+    filename = f"forge-{artifact_version}-installer.jar"
+    url = f"https://{FORGE_MAVEN_HOST}/net/minecraftforge/forge/{artifact_version}/{filename}"
+    opener = opener or urllib.request.build_opener(SameHostLibraryRedirectHandler(FORGE_MAVEN_HOST))
+    request_headers = {"User-Agent": "VOIDEX-Launcher/0.8"}
+    checksum_request = urllib.request.Request(url + ".sha1", headers=request_headers)
+    with opener.open(checksum_request, timeout=25) as response:
+        checksum_text = response.read(256).decode("ascii", errors="strict").strip().split()[0]
+    if not _SHA1_RE.fullmatch(checksum_text):
+        raise ValueError("Forge installer SHA-1 metadata is invalid.")
+    target = root / filename
+    if target.is_symlink():
+        raise ValueError("Refusing to overwrite a symbolic-link Forge installer.")
+
+    def valid(path):
+        if not path.is_file() or not 0 < path.stat().st_size <= MAX_FORGE_INSTALLER_BYTES:
+            return False
+        digest = hashlib.sha1()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == checksum_text.lower()
+
+    if valid(target):
+        if progress_callback:
+            progress_callback(target.stat().st_size, target.stat().st_size)
+        return target
+    temporary = None
+    digest = hashlib.sha1()
+    received = 0
+    try:
+        request = urllib.request.Request(url, headers=request_headers)
+        with opener.open(request, timeout=45) as response:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=filename + ".", suffix=".part",
+                dir=str(root), delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                while True:
+                    chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    received += len(chunk)
+                    if received > MAX_FORGE_INSTALLER_BYTES:
+                        raise ValueError("Forge installer exceeds the allowed download size.")
+                    stream.write(chunk)
+                    digest.update(chunk)
+                    if progress_callback:
+                        progress_callback(received, 0)
+        if received == 0 or digest.hexdigest() != checksum_text.lower():
+            raise ValueError("Forge installer SHA-1 verification failed.")
+        os.replace(temporary, target)
+        temporary = None
+        return target
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def install_forge_loader(game_version, forge_version, java_executable, voidex_root,
+                         progress_callback=None, opener=None, runner=None):
+    """Download and run the official Forge client installer, then validate its profile."""
+    builds = fetch_forge_loader_versions(game_version, opener=opener)
+    if forge_version not in {item["version"] for item in builds}:
+        raise ValueError("The selected Forge build is not available for this Minecraft version.")
+    java = Path(java_executable).expanduser()
+    if java.is_symlink() or not java.is_file():
+        raise ValueError("Select a valid Java executable before installing Forge.")
+    java_validation = validate_java_executable(java)
+    java = Path(java_validation["path"])
+    root = Path(voidex_root).expanduser()
+    if root.is_symlink():
+        raise ValueError("VOIDEX data directory must not be a symbolic link.")
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    if progress_callback:
+        progress_callback("Downloading official Forge installer")
+    installer = _download_forge_installer(
+        game_version, forge_version, root / "cache" / "installers",
+        opener=opener,
+    )
+    if progress_callback:
+        progress_callback("Installing Forge client profile")
+    command = [
+        str(java.resolve()), "-jar", str(installer), "--installClient", str(root)
+    ]
+    execute = runner or subprocess.run
+    try:
+        completed = execute(
+            command, cwd=str(root), capture_output=True, text=True,
+            timeout=900, check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Forge installer timed out after 15 minutes.") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "No installer output").strip()
+        raise ValueError("Forge installer failed: " + detail[-1800:])
+    versions_root = root / "versions"
+    if versions_root.is_symlink() or not versions_root.is_dir():
+        raise ValueError("Forge installer did not create a versions directory.")
+    candidates = []
+    for folder in versions_root.iterdir():
+        if folder.is_symlink() or not folder.is_dir():
+            continue
+        profile_path = folder / (folder.name + ".json")
+        if profile_path.is_symlink() or not profile_path.is_file():
+            continue
+        try:
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (isinstance(profile, dict) and profile.get("inheritsFrom") == game_version
+                and profile.get("id") == folder.name
+                and isinstance(profile.get("mainClass"), str)
+                and isinstance(profile.get("libraries"), list)
+                and folder.name.startswith(f"{game_version}-forge-")):
+            candidates.append((folder.name, profile_path))
+    if len(candidates) != 1:
+        raise ValueError("Forge installation did not produce one valid profile for the selected Minecraft version.")
+    profile_id, profile_path = candidates[0]
+    return {
+        "game_version": game_version, "loader_version": forge_version,
+        "profile_id": profile_id, "profile_path": str(profile_path),
+        "output": (completed.stdout or "")[-2000:],
+    }
+
+
 def list_installed_mods(mods_directory):
     """List regular JAR files in an instance mods directory without following links."""
     root = Path(mods_directory).expanduser()
