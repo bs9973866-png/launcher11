@@ -370,3 +370,117 @@ def resolve_library_artifacts(version_metadata, os_name="windows",
                 resolved[item["path"]] = item
 
     return [resolved[path] for path in sorted(resolved)]
+
+
+class SameHostLibraryRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Allow library downloads to redirect only over HTTPS to the original host."""
+
+    def __init__(self, original_host):
+        super().__init__()
+        if not isinstance(original_host, str) or not original_host:
+            raise ValueError("A library redirect host is required.")
+        self.original_host = original_host.lower()
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlparse(newurl)
+        if (parsed.scheme != "https" or parsed.hostname is None
+                or parsed.hostname.lower() != self.original_host
+                or parsed.username is not None or parsed.password is not None):
+            raise ValueError("Library download redirected outside its original HTTPS host.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def download_verified_library(artifact, libraries_root, progress_callback=None, opener=None):
+    """Download one resolved library artifact with path, host, size and SHA-1 checks.
+
+    Native classifier JARs are downloaded as ordinary verified files; extraction is
+    deliberately a separate step so archive paths can be validated independently.
+    """
+    if not isinstance(artifact, dict):
+        raise ValueError("Invalid library artifact.")
+    validated = _validated_library_artifact(
+        {key: artifact.get(key) for key in ("path", "url", "sha1", "size")},
+        artifact.get("source", "artifact"),
+    )
+    parsed = urlparse(validated["url"])
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Library download URL must not contain credentials.")
+
+    root = Path(libraries_root).resolve()
+    relative = Path(validated["path"])
+    target = (root / relative).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Library artifact path escapes the libraries directory.") from exc
+    root.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Re-check after directory creation to catch symlinked parent directories.
+    target = (root / relative).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Library artifact path escapes the libraries directory.") from exc
+
+    expected_size = validated["size"]
+    expected_sha1 = validated["sha1"]
+
+    def is_verified(path):
+        if not path.is_file() or path.stat().st_size != expected_size:
+            return False
+        digest = hashlib.sha1()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == expected_sha1
+
+    if is_verified(target):
+        if progress_callback:
+            progress_callback(expected_size, expected_size)
+        return target
+
+    request = urllib.request.Request(
+        validated["url"], headers={"User-Agent": "VOIDEX-Launcher/0.5"}
+    )
+    if opener is None:
+        opener = urllib.request.build_opener(
+            SameHostLibraryRedirectHandler(parsed.hostname)
+        )
+
+    temporary_path = None
+    digest = hashlib.sha1()
+    downloaded = 0
+    try:
+        with opener.open(request, timeout=30) as response:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=target.name + ".", suffix=".part",
+                dir=str(target.parent), delete=False
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                while True:
+                    chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+                    if downloaded > expected_size:
+                        raise ValueError("Downloaded library is larger than its declared size.")
+                    temporary.write(chunk)
+                    digest.update(chunk)
+                    if progress_callback:
+                        progress_callback(downloaded, expected_size)
+
+        if downloaded != expected_size:
+            raise ValueError(
+                f"Incomplete library download: expected {expected_size} bytes, received {downloaded}."
+            )
+        if digest.hexdigest() != expected_sha1:
+            raise ValueError("Library artifact SHA-1 verification failed.")
+        os.replace(temporary_path, target)
+        temporary_path = None
+        return target
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
