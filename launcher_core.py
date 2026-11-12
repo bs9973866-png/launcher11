@@ -1481,6 +1481,319 @@ def fetch_modrinth_compatible_version(project_id, game_version, loader="fabric",
     raise ValueError(f"No {loader} build of this mod is available for Minecraft {game_version}.")
 
 
+MAX_MRPACK_ENTRIES = 5000
+MAX_MRPACK_FILE_BYTES = 512 * 1024 * 1024
+MAX_MRPACK_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+MRPACK_DOWNLOAD_HOSTS = {
+    "cdn.modrinth.com", "edge.forgecdn.net", "mediafilez.forgecdn.net",
+    "github.com", "objects.githubusercontent.com",
+}
+_MRPACK_GAME_VERSION_RE = re.compile(r"^\\d+\\.\\d+(?:\\.\\d+)?$")
+
+
+def _mrpack_relative_path(raw_path):
+    if (not isinstance(raw_path, str) or not raw_path or len(raw_path) > 512
+            or "\\\\" in raw_path or "\\x00" in raw_path):
+        raise ValueError("Modpack contains an invalid file path.")
+    relative = PurePosixPath(raw_path)
+    if (relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or (relative.parts and ":" in relative.parts[0])
+            or any(any(char in '<>:"|?*' for char in part) for part in relative.parts)
+            or any(part.endswith((" ", ".")) for part in relative.parts)
+            or any(part.split(".", 1)[0].upper() in {
+                "CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                *(f"LPT{i}" for i in range(1, 10)),
+            } for part in relative.parts)):
+        raise ValueError("Modpack file path is unsafe or escapes the instance.")
+    return relative
+
+
+class MrpackRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlparse(newurl)
+        if (parsed.scheme != "https" or parsed.hostname not in MRPACK_DOWNLOAD_HOSTS
+                or parsed.username is not None or parsed.password is not None):
+            raise ValueError("Modpack download redirected to an untrusted host.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _download_mrpack_file(item, destination, opener=None, progress_callback=None):
+    if not isinstance(item, dict):
+        raise ValueError("Modpack download entry is invalid.")
+    relative = _mrpack_relative_path(item.get("path"))
+    urls = item.get("downloads")
+    hashes = item.get("hashes")
+    size = item.get("fileSize")
+    if (not isinstance(urls, list) or not urls or len(urls) > 10
+            or not isinstance(hashes, dict)
+            or not isinstance(size, int) or isinstance(size, bool)
+            or not 0 < size <= MAX_MRPACK_FILE_BYTES):
+        raise ValueError(f"Modpack file metadata is invalid: {relative.as_posix()}")
+    sha1 = hashes.get("sha1")
+    sha512 = hashes.get("sha512")
+    if not ((isinstance(sha1, str) and _MODRINTH_SHA1_RE.fullmatch(sha1))
+            or (isinstance(sha512, str) and _MODRINTH_SHA512_RE.fullmatch(sha512))):
+        raise ValueError(f"Modpack file has no supported checksum: {relative.as_posix()}")
+    expected_hash = (sha512 or sha1).lower()
+    algorithm = hashlib.sha512 if sha512 else hashlib.sha1
+    target = Path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        raise ValueError("Modpack staging path contains a symbolic link.")
+    if opener is None:
+        opener = urllib.request.build_opener(MrpackRedirectHandler())
+    errors = []
+    for url in urls:
+        parsed = urlparse(url if isinstance(url, str) else "")
+        if (parsed.scheme != "https" or parsed.hostname not in MRPACK_DOWNLOAD_HOSTS
+                or parsed.username is not None or parsed.password is not None):
+            errors.append("untrusted download host")
+            continue
+        temporary = None
+        digest = algorithm()
+        received = 0
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "VOIDEX-Launcher/1.0 (Modrinth modpack)"}
+            )
+            with opener.open(request, timeout=45) as response:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", prefix=target.name + ".", suffix=".part",
+                    dir=str(target.parent), delete=False,
+                ) as stream:
+                    temporary = Path(stream.name)
+                    while True:
+                        chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                        if received > size:
+                            raise ValueError("Modpack download exceeded its published file size.")
+                        stream.write(chunk)
+                        digest.update(chunk)
+                        if progress_callback:
+                            progress_callback(received, size)
+            if received != size:
+                raise ValueError(f"Incomplete modpack file: expected {size}, received {received} bytes.")
+            if digest.hexdigest().lower() != expected_hash:
+                raise ValueError("Modpack file checksum verification failed.")
+            os.replace(temporary, target)
+            temporary = None
+            return target
+        except Exception as exc:
+            errors.append(str(exc))
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    raise ValueError(
+        f"Could not download {relative.as_posix()}: " + "; ".join(errors[-3:])
+    )
+
+
+def install_modrinth_mrpack(archive_path, voidex_root, java_executable="",
+                            progress_callback=None, opener=None, runner=None):
+    """Validate and import a Modrinth .mrpack into its Minecraft-version instance."""
+    archive = Path(archive_path).expanduser()
+    if archive.is_symlink() or not archive.is_file() or archive.stat().st_size > 100 * 1024 * 1024:
+        raise ValueError("Select a valid .mrpack archive (maximum 100 MiB).")
+    root = Path(voidex_root).expanduser()
+    if root.is_symlink():
+        raise ValueError("VOIDEX data directory must not be a symbolic link.")
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    staging_parent = root / "cache" / "modpacks"
+    staging_parent.mkdir(parents=True, exist_ok=True)
+    if staging_parent.is_symlink():
+        raise ValueError("Modpack staging directory must not be a symbolic link.")
+    staging = Path(tempfile.mkdtemp(prefix="import-", dir=str(staging_parent)))
+    staged_files = {}
+    total_expected = 0
+    installed_loader = None
+    try:
+        with zipfile.ZipFile(archive, "r") as package:
+            entries = package.infolist()
+            if not entries or len(entries) > MAX_MRPACK_ENTRIES:
+                raise ValueError("Modpack archive has an invalid entry count.")
+            manifest_info = next((entry for entry in entries if entry.filename == "modrinth.index.json"), None)
+            if manifest_info is None or manifest_info.file_size > 8 * 1024 * 1024:
+                raise ValueError("This is not a valid Modrinth .mrpack: manifest is missing or too large.")
+            try:
+                manifest = json.loads(package.read(manifest_info).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError, KeyError) as exc:
+                raise ValueError("Modpack manifest is invalid JSON.") from exc
+            if (not isinstance(manifest, dict) or manifest.get("formatVersion") != 1
+                    or manifest.get("game") != "minecraft"):
+                raise ValueError("Unsupported modpack format; expected Modrinth formatVersion 1 for Minecraft.")
+            name = manifest.get("name")
+            if not isinstance(name, str) or not name.strip() or len(name) > 100:
+                raise ValueError("Modpack name is missing or invalid.")
+            dependencies = manifest.get("dependencies")
+            if not isinstance(dependencies, dict):
+                raise ValueError("Modpack dependencies are missing.")
+            game_version = dependencies.get("minecraft")
+            if not isinstance(game_version, str) or not _MRPACK_GAME_VERSION_RE.fullmatch(game_version):
+                raise ValueError("Modpack does not specify a supported Minecraft release.")
+            loader_dependencies = [
+                (key, value) for key, value in dependencies.items()
+                if key in {"fabric-loader", "forge", "neoforge", "quilt-loader"}
+            ]
+            if len(loader_dependencies) > 1:
+                raise ValueError("Modpack declares multiple incompatible loaders.")
+            loader_name, loader_version = loader_dependencies[0] if loader_dependencies else ("vanilla", "")
+            if loader_name != "vanilla" and (
+                    not isinstance(loader_version, str)
+                    or not re.fullmatch(r"[0-9A-Za-z.+_-]{1,80}", loader_version)):
+                raise ValueError("Modpack loader version is invalid.")
+            files = manifest.get("files", [])
+            if not isinstance(files, list) or len(files) > 2000:
+                raise ValueError("Modpack file list is invalid or too large.")
+            seen = set()
+            for item in files:
+                if not isinstance(item, dict):
+                    raise ValueError("Modpack file entry is invalid.")
+                env = item.get("env", {})
+                if isinstance(env, dict) and env.get("client") == "unsupported":
+                    continue
+                relative = _mrpack_relative_path(item.get("path"))
+                key = relative.as_posix().casefold()
+                if key in seen:
+                    raise ValueError("Modpack contains duplicate or case-conflicting paths.")
+                seen.add(key)
+                size = item.get("fileSize")
+                if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > MAX_MRPACK_FILE_BYTES:
+                    raise ValueError(f"Modpack file size is invalid: {relative.as_posix()}")
+                total_expected += size
+                if total_expected > MAX_MRPACK_TOTAL_BYTES:
+                    raise ValueError("Modpack download size exceeds the 2 GiB safety limit.")
+                stage_target = staging / "files" / Path(*relative.parts)
+                _download_mrpack_file(
+                    item, stage_target, opener=opener,
+                    progress_callback=progress_callback,
+                )
+                staged_files[relative.as_posix()] = stage_target
+
+            override_entries = []
+            total_unpacked = 0
+            for info in entries:
+                if info.is_dir() or not (
+                    info.filename.startswith("overrides/")
+                    or info.filename.startswith("client-overrides/")
+                ):
+                    continue
+                prefix = "client-overrides/" if info.filename.startswith("client-overrides/") else "overrides/"
+                raw_relative = info.filename[len(prefix):]
+                relative = _mrpack_relative_path(raw_relative)
+                key = relative.as_posix().casefold()
+                if key in seen:
+                    raise ValueError("Modpack contains duplicate override and downloaded file paths.")
+                seen.add(key)
+                mode = (info.external_attr >> 16) & 0xFFFF
+                if stat.S_ISLNK(mode) or info.flag_bits & 0x1:
+                    raise ValueError("Modpack overrides contain a symbolic link or encrypted file.")
+                if info.file_size < 0 or info.file_size > MAX_MRPACK_FILE_BYTES:
+                    raise ValueError("Modpack override file exceeds the per-file size limit.")
+                total_unpacked += info.file_size
+                if total_unpacked > MAX_MRPACK_TOTAL_BYTES:
+                    raise ValueError("Modpack overrides exceed the 2 GiB extraction limit.")
+                stage_target = staging / "files" / Path(*relative.parts)
+                stage_target.parent.mkdir(parents=True, exist_ok=True)
+                if stage_target.exists():
+                    raise ValueError("Modpack contains a duplicate file path.")
+                with package.open(info, "r") as source, stage_target.open("xb") as target:
+                    copied = 0
+                    while True:
+                        chunk = source.read(DOWNLOAD_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        copied += len(chunk)
+                        if copied > info.file_size:
+                            raise ValueError("Modpack override expanded beyond its declared size.")
+                        target.write(chunk)
+                if copied != info.file_size:
+                    raise ValueError("Modpack override size did not match its ZIP metadata.")
+                staged_files[relative.as_posix()] = stage_target
+                override_entries.append(relative.as_posix())
+
+        instance = root / "instances" / game_version
+        if instance.is_symlink():
+            raise ValueError("Minecraft instance directory must not be a symbolic link.")
+        instance.mkdir(parents=True, exist_ok=True)
+        instance_root = instance.resolve()
+        for raw_relative, staged_path in staged_files.items():
+            relative = _mrpack_relative_path(raw_relative)
+            target = instance_root / Path(*relative.parts)
+            current = target
+            while current != instance_root:
+                if current.is_symlink():
+                    raise ValueError("Existing instance path contains a symbolic link.")
+                current = current.parent
+            resolved = target.resolve()
+            try:
+                resolved.relative_to(instance_root)
+            except ValueError as exc:
+                raise ValueError("Modpack target path escapes the instance.") from exc
+            if resolved.exists():
+                if not resolved.is_file() or resolved.stat().st_size != staged_path.stat().st_size:
+                    raise ValueError(f"Modpack would overwrite an existing file: {raw_relative}")
+                if hashlib.sha256(resolved.read_bytes()).digest() != hashlib.sha256(staged_path.read_bytes()).digest():
+                    raise ValueError(f"Modpack would overwrite an existing file: {raw_relative}")
+
+        if loader_name != "vanilla":
+            if not java_executable:
+                raise ValueError("This modpack requires a Java executable; set it in Settings first.")
+            installers = {
+                "fabric-loader": install_fabric_loader,
+                "forge": install_forge_loader,
+                "neoforge": install_neoforge_loader,
+                "quilt-loader": install_quilt_loader,
+            }
+            if progress_callback:
+                progress_callback(0, 0)
+            installed_loader = installers[loader_name](
+                game_version, loader_version, java_executable, root,
+                progress_callback=(lambda stage: None), opener=opener, runner=runner,
+            )
+        created = []
+        try:
+            for raw_relative, staged_path in staged_files.items():
+                relative = _mrpack_relative_path(raw_relative)
+                target = instance_root / Path(*relative.parts)
+                if target.exists():
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                current = target.parent
+                while current != instance_root:
+                    if current.is_symlink():
+                        raise ValueError("Instance path became unsafe during modpack import.")
+                    current = current.parent
+                temporary = target.with_name(target.name + ".voidex-part")
+                if temporary.exists() or temporary.is_symlink():
+                    raise ValueError("A temporary modpack destination already exists.")
+                shutil.copyfile(staged_path, temporary)
+                os.replace(temporary, target)
+                created.append(target)
+        except Exception:
+            for target in reversed(created):
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+        return {
+            "name": name.strip(), "game_version": game_version,
+            "loader": loader_name, "loader_version": loader_version,
+            "profile_id": installed_loader["profile_id"] if installed_loader else "",
+            "instance_directory": str(instance_root),
+            "files_installed": len(staged_files), "overrides_installed": len(override_entries),
+        }
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 QUILT_META_HOST = "meta.quiltmc.org"
 QUILT_MAVEN_HOST = "maven.quiltmc.org"
 MAX_QUILT_INSTALLER_BYTES = 100 * 1024 * 1024
