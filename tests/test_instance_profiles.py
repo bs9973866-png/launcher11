@@ -6,7 +6,7 @@ from pathlib import Path
 from instance_profiles import (
     create_instance_profile, delete_instance_profile, list_instance_profiles,
     rename_instance_profile, update_instance_profile_loader, set_instance_profile_loader_profile,
-    resolve_instance_mods_directory,
+    resolve_instance_mods_directory, resolve_instance_resource_directories,
 )
 
 
@@ -188,6 +188,36 @@ class InstanceProfileTests(unittest.TestCase):
             self.assertEqual(second_mods, Path(second["game_directory_path"]) / "mods")
             with self.assertRaisesRegex(ValueError, "not selected version"):
                 resolve_instance_mods_directory(root, first["id"], "1.20.1")
+
+    def test_resource_and_shader_directories_are_isolated_per_instance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "profiles"
+            first = create_instance_profile(root, "PvP", "1.21.8")
+            second = create_instance_profile(root, "Survival", "1.21.8")
+
+            first_dirs = resolve_instance_resource_directories(root, first["id"], "1.21.8")
+            second_dirs = resolve_instance_resource_directories(root, second["id"], "1.21.8")
+            self.assertEqual(set(first_dirs), {"resourcepacks", "shaderpacks"})
+            for key in ("resourcepacks", "shaderpacks"):
+                self.assertEqual(first_dirs[key], Path(first["game_directory_path"]) / key)
+                self.assertEqual(second_dirs[key], Path(second["game_directory_path"]) / key)
+                self.assertNotEqual(first_dirs[key], second_dirs[key])
+            with self.assertRaisesRegex(ValueError, "not selected version"):
+                resolve_instance_resource_directories(root, first["id"], "1.20.1")
+
+    def test_resource_directory_rejects_symbolic_link(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "profiles"
+            profile = create_instance_profile(root, "Unsafe", "1.21.8")
+            game = Path(profile["game_directory_path"])
+            target = Path(temp) / "outside"
+            target.mkdir()
+            try:
+                (game / "shaderpacks").symlink_to(target, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("Directory symlinks are unavailable on this platform")
+            with self.assertRaisesRegex(ValueError, "shaderpacks directory is a symbolic link"):
+                resolve_instance_resource_directories(root, profile["id"], "1.21.8")
 
     def test_mods_directory_rejects_symbolic_link(self):
         with tempfile.TemporaryDirectory() as temp:
