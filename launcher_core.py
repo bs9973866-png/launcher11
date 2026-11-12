@@ -254,3 +254,114 @@ def download_verified_version_json(metadata_url, expected_sha1, destination,
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+_LIBRARY_OS_NAMES = {"windows", "linux", "osx"}
+_LIBRARY_ARCHES = {"x86": "32", "x86_64": "64", "arm64": "64"}
+
+
+def _library_rule_matches(rule, os_name, arch, features):
+    if not isinstance(rule, dict):
+        return False
+    os_rule = rule.get("os", {})
+    if os_rule and not isinstance(os_rule, dict):
+        return False
+    if os_rule.get("name") and os_rule["name"] != os_name:
+        return False
+    if os_rule.get("arch"):
+        expected = os_rule["arch"]
+        actual = {"x86_64": "amd64", "x86": "x86"}.get(arch, arch)
+        if expected not in {actual, arch}:
+            return False
+    for feature, expected in (rule.get("features") or {}).items():
+        if features.get(feature, False) != expected:
+            return False
+    return True
+
+
+def _library_allowed(library, os_name, arch, features):
+    rules = library.get("rules")
+    if rules is None:
+        return True
+    if not isinstance(rules, list):
+        raise ValueError("Library rules must be a list.")
+    allowed = False
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("action") not in {"allow", "disallow"}:
+            raise ValueError("Library metadata contains an invalid rule.")
+        if _library_rule_matches(rule, os_name, arch, features):
+            allowed = rule["action"] == "allow"
+    return allowed
+
+
+def _validated_library_artifact(artifact, source):
+    if not isinstance(artifact, dict):
+        raise ValueError("Library artifact metadata must be an object.")
+    path = artifact.get("path")
+    if not isinstance(path, str) or not path or "\\\\" in path:
+        raise ValueError("Library artifact has an invalid relative path.")
+    relative = Path(path)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("Library artifact path escapes the libraries directory.")
+    url = artifact.get("url")
+    parsed = urlparse(url if isinstance(url, str) else "")
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("Library artifact URL must use HTTPS.")
+    sha1 = artifact.get("sha1")
+    if not isinstance(sha1, str) or not _SHA1_RE.fullmatch(sha1):
+        raise ValueError("Library artifact contains an invalid SHA-1 checksum.")
+    size = artifact.get("size")
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise ValueError("Library artifact contains an invalid size.")
+    return {
+        "path": relative.as_posix(),
+        "url": url,
+        "sha1": sha1.lower(),
+        "size": size,
+        "source": source,
+    }
+
+
+def resolve_library_artifacts(version_metadata, os_name="windows",
+                              arch="x86_64", features=None):
+    """Resolve Mojang library artifacts and native classifiers for one target platform."""
+    if not isinstance(version_metadata, dict):
+        raise ValueError("Invalid version metadata document.")
+    if os_name not in _LIBRARY_OS_NAMES or arch not in _LIBRARY_ARCHES:
+        raise ValueError("Unsupported target platform for library resolution.")
+    libraries = version_metadata.get("libraries", [])
+    if not isinstance(libraries, list):
+        raise ValueError("Version libraries must be a list.")
+    feature_flags = features or {}
+    if not isinstance(feature_flags, dict):
+        raise ValueError("Library feature flags must be an object.")
+
+    resolved = {}
+    for library in libraries:
+        if not isinstance(library, dict):
+            raise ValueError("Library entry must be an object.")
+        if not _library_allowed(library, os_name, arch, feature_flags):
+            continue
+        downloads = library.get("downloads") or {}
+        if not isinstance(downloads, dict):
+            raise ValueError("Library downloads metadata must be an object.")
+        artifact = downloads.get("artifact")
+        if artifact is not None:
+            item = _validated_library_artifact(artifact, "artifact")
+            resolved[item["path"]] = item
+
+        natives = library.get("natives") or {}
+        classifiers = downloads.get("classifiers") or {}
+        if not isinstance(natives, dict) or not isinstance(classifiers, dict):
+            raise ValueError("Native library metadata must be objects.")
+        native_key = natives.get(os_name)
+        if native_key:
+            if not isinstance(native_key, str):
+                raise ValueError("Native classifier name must be a string.")
+            classifier_name = native_key.replace("\u0024{arch}", _LIBRARY_ARCHES[arch])
+            native_artifact = classifiers.get(classifier_name)
+            if native_artifact is not None:
+                item = _validated_library_artifact(native_artifact, "native")
+                resolved[item["path"]] = item
+
+    return [resolved[path] for path in sorted(resolved)]
