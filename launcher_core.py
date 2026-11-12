@@ -1480,6 +1480,45 @@ def fetch_modrinth_compatible_version(project_id, game_version, loader="fabric",
     raise ValueError(f"No {loader} build of this mod is available for Minecraft {game_version}.")
 
 
+def list_installed_mods(mods_directory):
+    """List regular JAR files in an instance mods directory without following links."""
+    root = Path(mods_directory).expanduser()
+    if root.is_symlink():
+        raise ValueError("Refusing to inspect a symbolic-link mods directory.")
+    if not root.exists():
+        return []
+    if not root.is_dir():
+        raise ValueError("Mods path is not a directory.")
+    root = root.resolve()
+    results = []
+    for item in root.iterdir():
+        if item.suffix.lower() != ".jar" or item.is_symlink() or not item.is_file():
+            continue
+        results.append({"name": item.name, "size": item.stat().st_size})
+    return sorted(results, key=lambda entry: entry["name"].casefold())
+
+
+def remove_installed_mod(mods_directory, filename):
+    """Remove one regular JAR by its exact filename; never follow symlinks or paths."""
+    if (not isinstance(filename, str) or not filename or Path(filename).name != filename
+            or "/" in filename or "\\\\" in filename
+            or not filename.lower().endswith(".jar")):
+        raise ValueError("Choose a valid mod JAR filename.")
+    root = Path(mods_directory).expanduser()
+    if root.is_symlink():
+        raise ValueError("Refusing to modify a symbolic-link mods directory.")
+    if not root.exists() or not root.is_dir():
+        raise ValueError("The instance mods directory does not exist.")
+    root = root.resolve()
+    target = root / filename
+    if target.is_symlink():
+        raise ValueError("Refusing to remove a symbolic-link mod file.")
+    if target.parent.resolve() != root or not target.is_file():
+        raise ValueError("The selected mod file no longer exists.")
+    target.unlink()
+    return target
+
+
 class ModrinthRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         parsed = urlparse(newurl)
