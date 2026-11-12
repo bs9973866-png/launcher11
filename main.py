@@ -8,7 +8,9 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from launcher_core import fetch_version_metadata, summarize_version_metadata, download_verified_client, download_verified_version_json
+from launcher_core import (fetch_version_metadata, summarize_version_metadata, download_verified_client,
+                            download_verified_version_json, resolve_library_artifacts,
+                            download_verified_libraries)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal
 from PySide6.QtWidgets import (
@@ -128,6 +130,38 @@ class VersionJsonWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class LibraryInstallWorker(QThread):
+    progress = Signal(int, int, str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, metadata_url, expected_sha1, version_json_path, libraries_root, parent=None):
+        super().__init__(parent)
+        self.metadata_url = metadata_url
+        self.expected_sha1 = expected_sha1
+        self.version_json_path = version_json_path
+        self.libraries_root = libraries_root
+
+    def run(self):
+        try:
+            json_path = download_verified_version_json(
+                self.metadata_url, self.expected_sha1, self.version_json_path,
+                progress_callback=lambda done, total: self.progress.emit(done, total, "version JSON"),
+            )
+            with Path(json_path).open("r", encoding="utf-8") as stream:
+                version_metadata = json.load(stream)
+            artifacts = resolve_library_artifacts(version_metadata, os_name="windows", arch="x86_64")
+            if not artifacts:
+                self.completed.emit([])
+                return
+            paths = download_verified_libraries(
+                artifacts, self.libraries_root,
+                progress_callback=lambda done, total, path: self.progress.emit(done, total, path),
+            )
+            self.completed.emit([str(path) for path in paths])
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -136,6 +170,7 @@ class MainWindow(QMainWindow):
         self.metadata_worker = None
         self.download_worker = None
         self.version_json_worker = None
+        self.library_worker = None
         self.selected_metadata = None
         self.selected_metadata_version = None
         self.versions = []
@@ -309,11 +344,15 @@ class MainWindow(QMainWindow):
         self.version_json_button = QPushButton("Cache version JSON")
         self.version_json_button.setEnabled(False)
         self.version_json_button.clicked.connect(self.cache_selected_version_json)
+        self.library_button = QPushButton("Install libraries")
+        self.library_button.setEnabled(False)
+        self.library_button.clicked.connect(self.install_selected_libraries)
         bottom.addWidget(self.version_status, 1)
         bottom.addWidget(self.selected_version_label)
         bottom.addWidget(self.inspect_button)
         bottom.addWidget(self.download_button)
         bottom.addWidget(self.version_json_button)
+        bottom.addWidget(self.library_button)
         bottom.addWidget(choose)
         layout.addLayout(bottom)
         return page
@@ -399,6 +438,7 @@ class MainWindow(QMainWindow):
         self.selected_metadata_version = version_id
         self.download_button.setEnabled(True)
         self.version_json_button.setEnabled(True)
+        self.library_button.setEnabled(True)
         self.version_status.setText(
             f"{version_id}: {java} • client JAR {size_mb:.1f} MiB • "
             f"{summary['libraries_count']} libraries • assets {summary['asset_index'] or 'n/a'}"
@@ -408,6 +448,56 @@ class MainWindow(QMainWindow):
         )
         self.metadata_worker = None
 
+
+    def install_selected_libraries(self):
+        if self.library_worker and self.library_worker.isRunning():
+            return
+        if self.selected_metadata_version != self.selected_version:
+            QMessageBox.information(self, "VOIDEX", "Inspect the selected version first.")
+            return
+        entry = next((item for item in self.versions
+                      if item.get("id") == self.selected_version), None)
+        if not entry or not entry.get("url") or not entry.get("sha1"):
+            self.log("Selected version has no verified JSON metadata URL or SHA-1.")
+            return
+
+        version_id = self.selected_version
+        cache_root = Path.home() / ".voidex" / "cache" / "versions" / version_id
+        json_path = cache_root / f"{version_id}.json"
+        libraries_root = Path.home() / ".voidex" / "libraries"
+        self.library_button.setEnabled(False)
+        self.version_status.setText(f"Preparing libraries for {version_id}...")
+        self.library_worker = LibraryInstallWorker(
+            entry["url"], entry["sha1"], json_path, libraries_root, self
+        )
+        self.library_worker.progress.connect(self._library_install_progress)
+        self.library_worker.completed.connect(self._library_install_completed)
+        self.library_worker.failed.connect(self._library_install_failed)
+        self.library_worker.finished.connect(lambda: self.library_button.setEnabled(True))
+        self.library_worker.start()
+        self.log(f"Resolving and downloading verified Windows x64 libraries for {version_id}.")
+
+    def _library_install_progress(self, completed, total, current_path):
+        if total:
+            self.version_status.setText(
+                f"Libraries: {completed / (1024 * 1024):.1f} / "
+                f"{total / (1024 * 1024):.1f} MiB • {current_path}"
+            )
+        else:
+            self.version_status.setText(f"Preparing {current_path}...")
+
+    def _library_install_completed(self, paths):
+        count = len(paths)
+        self.version_status.setText(
+            f"Verified libraries cached: {count}. Assets, natives and game launch are still pending."
+        )
+        self.log(f"Library stage complete: {count} verified artifacts cached under .voidex/libraries.")
+        self.library_worker = None
+
+    def _library_install_failed(self, error):
+        self.version_status.setText("Library installation failed; unverified files were not accepted.")
+        self.log(f"Library installation error: {error}")
+        self.library_worker = None
 
     def cache_selected_version_json(self):
         if self.version_json_worker and self.version_json_worker.isRunning():
@@ -495,6 +585,7 @@ class MainWindow(QMainWindow):
         self.selected_metadata_version = None
         self.download_button.setEnabled(False)
         self.version_json_button.setEnabled(False)
+        self.library_button.setEnabled(False)
         self.version_status.setText("Could not inspect version metadata.")
         self.log(f"Version metadata error: {error}")
         self.metadata_worker = None
@@ -512,6 +603,7 @@ class MainWindow(QMainWindow):
             self.selected_metadata_version = None
             self.download_button.setEnabled(False)
             self.version_json_button.setEnabled(False)
+            self.library_button.setEnabled(False)
         self.selected_version_label.setText(f"Selected: {self.selected_version}")
         self.home_version.setText(f"Selected version: {self.selected_version}")
         self.settings.setValue("selected_version", self.selected_version)
