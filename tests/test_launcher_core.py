@@ -17,7 +17,8 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            verify_cached_asset_objects, safe_extract_temurin_zip,
                            _fetch_temurin_asset, install_temurin_runtime,
                            search_modrinth_mods, fetch_modrinth_compatible_version,
-                           download_verified_modrinth_file)
+                           download_verified_modrinth_file, list_installed_mods,
+                           remove_installed_mod)
 
 
 def sample_metadata():
@@ -824,6 +825,55 @@ class ModrinthIntegrationTests(unittest.TestCase):
             self.assertEqual(list(Path(directory).iterdir()), [])
 
 
+
+
+
+class InstalledModManagementTests(unittest.TestCase):
+    def test_lists_only_regular_jar_files_sorted_by_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "zeta.jar").write_bytes(b"123")
+            (root / "Alpha.JAR").write_bytes(b"12")
+            (root / "notes.txt").write_text("ignore", encoding="utf-8")
+            (root / "folder.jar").mkdir()
+            result = list_installed_mods(root)
+            self.assertEqual([item["name"] for item in result], ["Alpha.JAR", "zeta.jar"])
+            self.assertEqual([item["size"] for item in result], [2, 3])
+
+    def test_missing_mods_directory_is_an_empty_list(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(list_installed_mods(Path(directory) / "missing"), [])
+
+    def test_removes_only_the_selected_jar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "sodium.jar"
+            keep = root / "other.jar"
+            target.write_bytes(b"mod")
+            keep.write_bytes(b"keep")
+            self.assertEqual(remove_installed_mod(root, "sodium.jar"), target)
+            self.assertFalse(target.exists())
+            self.assertEqual(keep.read_bytes(), b"keep")
+
+    def test_rejects_paths_and_non_jar_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ("../outside.jar", "folder\\\\mod.jar", "notes.txt", ""):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    remove_installed_mod(directory, name)
+
+    def test_refuses_symbolic_link_mod_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root.parent / (root.name + "-outside.jar")
+            outside.write_bytes(b"outside")
+            link = root / "linked.jar"
+            try:
+                link.symlink_to(outside)
+            except (OSError, NotImplementedError):
+                self.skipTest("Symbolic links are not available in this environment.")
+            with self.assertRaisesRegex(ValueError, "symbolic-link"):
+                remove_installed_mod(root, "linked.jar")
+            self.assertEqual(outside.read_bytes(), b"outside")
 
 
 class LaunchPlanTests(unittest.TestCase):
