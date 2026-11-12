@@ -1488,12 +1488,12 @@ MRPACK_DOWNLOAD_HOSTS = {
     "cdn.modrinth.com", "edge.forgecdn.net", "mediafilez.forgecdn.net",
     "github.com", "objects.githubusercontent.com",
 }
-_MRPACK_GAME_VERSION_RE = re.compile(r"^\\d+\\.\\d+(?:\\.\\d+)?$")
+_MRPACK_GAME_VERSION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
 
 
 def _mrpack_relative_path(raw_path):
     if (not isinstance(raw_path, str) or not raw_path or len(raw_path) > 512
-            or "\\\\" in raw_path or "\\x00" in raw_path):
+            or "\\" in raw_path or "\x00" in raw_path):
         raise ValueError("Modpack contains an invalid file path.")
     relative = PurePosixPath(raw_path)
     if (relative.is_absolute()
