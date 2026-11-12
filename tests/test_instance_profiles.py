@@ -6,6 +6,7 @@ from pathlib import Path
 from instance_profiles import (
     create_instance_profile, delete_instance_profile, list_instance_profiles,
     rename_instance_profile, update_instance_profile_loader, set_instance_profile_loader_profile,
+    resolve_instance_mods_directory,
 )
 
 
