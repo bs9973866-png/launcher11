@@ -206,8 +206,9 @@ def update_instance_profile_loader(root, profile_id, expected_game_version, load
         raise ValueError("Instance Minecraft version changed during the operation.")
     if data.get("game_directory") != "game":
         raise ValueError("Instance profile game directory is invalid.")
-    if data.get("loader") != loader:
-        data["loader_profile_id"] = None
+    # An external modpack import may replace the generated loader profile.
+    # Until a concrete profile ID is bound again, never reuse an older one.
+    data["loader_profile_id"] = None
     data["loader"] = loader
     temporary = directory / "profile.json.tmp"
     try:
@@ -310,6 +311,14 @@ def resolve_instance_profile(root, profile_id, expected_game_version=None):
         )
     if data.get("loader") not in _ALLOWED_LOADERS or data.get("game_directory") != "game":
         raise ValueError("Instance profile settings are invalid.")
+    loader_profile_id = data.get("loader_profile_id")
+    if loader_profile_id is not None and (
+        not isinstance(loader_profile_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9_.+-]{1,160}", loader_profile_id)
+    ):
+        raise ValueError("Instance loader profile ID is invalid.")
+    if data.get("loader") == "vanilla" and loader_profile_id is not None:
+        raise ValueError("Vanilla instance cannot reference a loader profile.")
     game_directory = directory / "game"
     if game_directory.is_symlink() or not game_directory.is_dir():
         raise ValueError("Instance game directory is missing or unsafe.")
