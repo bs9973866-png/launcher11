@@ -10,6 +10,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import urllib.request
 from pathlib import Path, PurePosixPath
@@ -701,3 +703,99 @@ def extract_native_archives(archives, destination,
                     pass
 
     return extracted
+
+
+_JAVA_VERSION_RE = re.compile(r'version "([^"]+)"')
+
+
+def discover_java_candidates(extra_paths=None, environ=None, path_value=None):
+    """Find likely Java executables without recursively scanning the whole disk."""
+    env = os.environ if environ is None else environ
+    search_path = env.get("PATH", "") if path_value is None else path_value
+    is_windows = os.name == "nt"
+    executable_name = "java.exe" if is_windows else "java"
+    candidates = []
+
+    def add(value):
+        if not value:
+            return
+        candidate = Path(value).expanduser()
+        if candidate.is_dir():
+            candidate = candidate / "bin" / executable_name
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            return
+        if candidate.is_file() and candidate.name.lower() == executable_name:
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+    if extra_paths:
+        for item in extra_paths:
+            add(item)
+    java_home = env.get("JAVA_HOME")
+    if java_home:
+        add(Path(java_home) / "bin" / executable_name)
+    add(shutil.which("java", path=search_path))
+
+    if is_windows:
+        roots = [Path(env[key]) for key in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA") if env.get(key)]
+        vendors = ("Java", "Eclipse Adoptium", "Microsoft", "Zulu", "Azul",
+                   "Amazon Corretto", "BellSoft", "AdoptOpenJDK")
+        for root in roots:
+            for vendor in vendors:
+                vendor_root = root / vendor
+                if vendor_root.is_dir():
+                    try:
+                        for home in vendor_root.iterdir():
+                            add(home / "bin" / "java.exe")
+                    except OSError:
+                        continue
+    else:
+        for root in (Path("/usr/lib/jvm"), Path("/usr/java")):
+            if root.is_dir():
+                try:
+                    for home in root.iterdir():
+                        add(home / "bin" / "java")
+                except OSError:
+                    continue
+    return candidates
+
+
+def validate_java_executable(executable, expected_major=None, timeout=5):
+    """Run java -version safely and report the detected major version."""
+    path = Path(executable).expanduser()
+    if not path.is_file():
+        raise ValueError("Java executable does not exist or is not a file.")
+    if path.name.lower() not in {"java", "java.exe"}:
+        raise ValueError("Selected file is not named java or java.exe.")
+    if expected_major is not None and (
+        not isinstance(expected_major, int) or isinstance(expected_major, bool)
+        or expected_major < 1
+    ):
+        raise ValueError("Expected Java major version must be a positive integer.")
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        result = subprocess.run(
+            [str(path), "-version"], capture_output=True, text=True,
+            timeout=timeout, check=False, creationflags=creationflags,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"Could not execute Java: {exc}") from exc
+    output = (result.stderr or "") + "\n" + (result.stdout or "")
+    match = _JAVA_VERSION_RE.search(output)
+    if result.returncode != 0 or not match:
+        raise ValueError("Java did not return a recognizable version.")
+    version_text = match.group(1)
+    parts = version_text.split(".")
+    try:
+        major = int(parts[1] if parts[0] == "1" and len(parts) > 1 else parts[0])
+    except (ValueError, IndexError) as exc:
+        raise ValueError("Java reported an unrecognized version number.") from exc
+    if major < 1:
+        raise ValueError("Java reported an invalid major version.")
+    return {
+        "path": str(path.resolve()), "version": version_text, "major": major,
+        "compatible": expected_major is None or major >= expected_major,
+        "expected_major": expected_major,
+    }
