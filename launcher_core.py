@@ -1812,8 +1812,14 @@ def merge_neoforge_profile_metadata(base_metadata, profile, libraries_root):
     if not isinstance(base_id, str) or profile.get("inheritsFrom") != base_id:
         raise ValueError("NeoForge profile does not inherit from the selected Minecraft version.")
     profile_id = profile.get("id")
-    if (not isinstance(profile_id, str)
-            or not re.fullmatch(re.escape(base_id) + r"-neoforge-[A-Za-z0-9_.+-]+", profile_id)):
+    valid_profile_id = (
+        isinstance(profile_id, str)
+        and (
+            re.fullmatch(re.escape(base_id) + r"-neoforge-[A-Za-z0-9_.+-]+", profile_id)
+            or re.fullmatch(r"neoforge-[A-Za-z0-9_.+-]+", profile_id)
+        )
+    )
+    if not valid_profile_id:
         raise ValueError("NeoForge profile ID is invalid for the selected Minecraft version.")
     main_class = profile.get("mainClass")
     if not isinstance(main_class, str) or not main_class.strip():
@@ -2358,9 +2364,12 @@ def install_neoforge_loader(game_version, neoforge_version, java_executable, voi
     if versions_root.is_symlink() or not versions_root.is_dir():
         raise ValueError("NeoForge installer did not create a versions directory.")
     candidates = []
-    expected_prefix = f"{game_version}-neoforge-"
+    expected_ids = {
+        f"{game_version}-neoforge-{neoforge_version}",
+        f"neoforge-{neoforge_version}",
+    }
     for folder in versions_root.iterdir():
-        if folder.is_symlink() or not folder.is_dir() or not folder.name.startswith(expected_prefix):
+        if folder.is_symlink() or not folder.is_dir() or folder.name not in expected_ids:
             continue
         profile_path = folder / (folder.name + ".json")
         if profile_path.is_symlink() or not profile_path.is_file():
