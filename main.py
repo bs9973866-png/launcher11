@@ -255,6 +255,106 @@ class AssetInstallWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class FullInstallWorker(QThread):
+    stage = Signal(str)
+    progress = Signal(int, int, str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, version_id, manifest_entry, parent=None):
+        super().__init__(parent)
+        self.version_id = version_id
+        self.manifest_entry = dict(manifest_entry)
+
+    def run(self):
+        try:
+            version_id = self.version_id
+            home = Path.home() / ".voidex"
+            version_json_path = home / "cache" / "versions" / version_id / f"{version_id}.json"
+            libraries_root = home / "libraries"
+            assets_root = home / "assets"
+            client_path = home / "cache" / "clients" / f"{version_id}.jar"
+            natives_root = home / "versions" / version_id / "natives"
+            game_root = home / "instances" / version_id
+
+            self.stage.emit("Downloading and verifying version metadata")
+            json_path = download_verified_version_json(
+                self.manifest_entry.get("url"),
+                self.manifest_entry.get("sha1"),
+                version_json_path,
+                progress_callback=lambda done, total: self.progress.emit(done, total, "version JSON"),
+            )
+            with Path(json_path).open("r", encoding="utf-8") as stream:
+                metadata = json.load(stream)
+            if metadata.get("id") != version_id:
+                raise ValueError("Downloaded version metadata ID does not match the selected version.")
+
+            asset_ref = metadata.get("assetIndex")
+            if not isinstance(asset_ref, dict) or not asset_ref.get("id"):
+                raise ValueError("This Minecraft version has no supported asset index.")
+            if asset_ref.get("virtual") or metadata.get("assets") == "legacy":
+                raise ValueError(
+                    "This older version requires virtual/legacy asset materialization, which is not supported yet."
+                )
+
+            self.stage.emit("Downloading and verifying Minecraft client")
+            summary = summarize_version_metadata(metadata)
+            client = download_verified_client(
+                summary, client_path,
+                progress_callback=lambda done, total: self.progress.emit(done, total, "client JAR"),
+            )
+
+            self.stage.emit("Resolving and downloading libraries")
+            artifacts = resolve_library_artifacts(metadata, os_name="windows", arch="x86_64")
+            library_paths = download_verified_libraries(
+                artifacts, libraries_root,
+                progress_callback=lambda done, total, path: self.progress.emit(done, total, path),
+            )
+
+            self.stage.emit("Extracting native libraries")
+            native_artifacts = [item for item in artifacts if item.get("source") == "native"]
+            native_paths = [path for path, item in zip(library_paths, artifacts) if item.get("source") == "native"]
+            natives_root.mkdir(parents=True, exist_ok=True)
+            extracted = extract_native_archives(native_paths, natives_root) if native_paths else []
+            if not any(natives_root.iterdir()):
+                (natives_root / ".voidex-ready").write_text("no native archives required", encoding="utf-8")
+
+            self.stage.emit("Downloading and verifying Minecraft assets")
+            index_id = asset_ref.get("id")
+            if (not isinstance(index_id, str) or not index_id
+                    or any(not (char.isalnum() or char in "._-") for char in index_id)):
+                raise ValueError("Minecraft asset index ID is invalid.")
+            index_path = assets_root / "indexes" / f"{index_id}.json"
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            cached_index = download_verified_version_json(
+                asset_ref.get("url"), asset_ref.get("sha1"), index_path,
+                progress_callback=lambda done, total: self.progress.emit(done, total, "asset index"),
+            )
+            with Path(cached_index).open("r", encoding="utf-8") as stream:
+                asset_index = json.load(stream)
+            asset_artifacts = resolve_asset_objects(asset_index)
+            asset_paths = download_verified_libraries(
+                asset_artifacts, assets_root / "objects",
+                progress_callback=lambda done, total, path: self.progress.emit(done, total, path),
+            )
+            verification = verify_cached_asset_objects(cached_index, assets_root / "objects")
+
+            game_root.mkdir(parents=True, exist_ok=True)
+            self.completed.emit({
+                "version": version_id,
+                "client": str(client),
+                "libraries": len(library_paths),
+                "native_archives": len(native_paths),
+                "native_files": len(extracted),
+                "assets": len(asset_paths),
+                "verified_assets": verification["count"],
+                "game_directory": str(game_root),
+                "natives_directory": str(natives_root),
+            })
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class JavaCheckWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
@@ -417,6 +517,7 @@ class MainWindow(QMainWindow):
         self.library_worker = None
         self.asset_worker = None
         self.native_worker = None
+        self.full_install_worker = None
         self.java_worker = None
         self.launch_worker = None
         self.minecraft_process = None
@@ -607,6 +708,9 @@ class MainWindow(QMainWindow):
         self.asset_button = QPushButton("Install assets")
         self.asset_button.setEnabled(False)
         self.asset_button.clicked.connect(self.install_selected_assets)
+        self.full_install_button = QPushButton("Install selected version")
+        self.full_install_button.setEnabled(False)
+        self.full_install_button.clicked.connect(self.install_selected_version_all)
         self.native_button = QPushButton("Prepare natives")
         self.native_button.setEnabled(False)
         self.native_button.clicked.connect(self.prepare_selected_natives)
@@ -618,6 +722,7 @@ class MainWindow(QMainWindow):
         bottom.addWidget(self.library_button)
         bottom.addWidget(self.asset_button)
         bottom.addWidget(self.native_button)
+        bottom.addWidget(self.full_install_button)
         bottom.addWidget(choose)
         layout.addLayout(bottom)
         return page
@@ -706,6 +811,7 @@ class MainWindow(QMainWindow):
         self.library_button.setEnabled(True)
         self.asset_button.setEnabled(bool(summary["asset_index"]))
         self.native_button.setEnabled(True)
+        self.full_install_button.setEnabled(True)
         self.version_status.setText(
             f"{version_id}: {java} • client JAR {size_mb:.1f} MiB • "
             f"{summary['libraries_count']} libraries • assets {summary['asset_index'] or 'n/a'}"
@@ -714,6 +820,80 @@ class MainWindow(QMainWindow):
             f"{version_id} metadata validated: {java}; SHA-1 {summary['client_sha1']}."
         )
         self.metadata_worker = None
+
+
+    def install_selected_version_all(self):
+        if self.full_install_worker and self.full_install_worker.isRunning():
+            return
+        if self.selected_metadata_version != self.selected_version:
+            QMessageBox.information(self, "VOIDEX", "Inspect the selected version first.")
+            return
+        entry = next((item for item in self.versions
+                      if item.get("id") == self.selected_version), None)
+        if not entry or not entry.get("url") or not entry.get("sha1"):
+            QMessageBox.information(self, "VOIDEX", "The selected version has no verified Mojang metadata entry.")
+            return
+        other_workers = (
+            self.download_worker, self.version_json_worker, self.library_worker,
+            self.asset_worker, self.native_worker
+        )
+        if any(worker and worker.isRunning() for worker in other_workers):
+            QMessageBox.information(self, "VOIDEX", "Wait for the current download stage to finish first.")
+            return
+
+        version_id = self.selected_version
+        self.full_install_button.setEnabled(False)
+        for button in (self.download_button, self.version_json_button, self.library_button,
+                       self.asset_button, self.native_button):
+            button.setEnabled(False)
+        self.version_status.setText(f"Installing all required files for {version_id}...")
+        self.full_install_worker = FullInstallWorker(version_id, entry, self)
+        self.full_install_worker.stage.connect(self._full_install_stage)
+        self.full_install_worker.progress.connect(self._full_install_progress)
+        self.full_install_worker.completed.connect(self._full_install_completed)
+        self.full_install_worker.failed.connect(self._full_install_failed)
+        self.full_install_worker.finished.connect(self._full_install_finished)
+        self.full_install_worker.start()
+        self.log(f"Started one-button verified installation for Minecraft {version_id}.")
+
+    def _full_install_stage(self, stage):
+        self.version_status.setText(stage + "...")
+        self.log(stage + ".")
+
+    def _full_install_progress(self, completed, total, current_path):
+        if total:
+            self.version_status.setText(
+                f"{current_path}: {completed / (1024 * 1024):.1f} / "
+                f"{total / (1024 * 1024):.1f} MiB"
+            )
+        else:
+            self.version_status.setText(f"Preparing {current_path}...")
+
+    def _full_install_completed(self, result):
+        self.version_status.setText(
+            f"{result['version']} installed: {result['libraries']} libraries, "
+            f"{result['native_archives']} native archives, {result['verified_assets']} assets."
+        )
+        self.launch_status.setText(
+            f"Files for {result['version']} are installed and verified. Check Java in Settings, then press Launch."
+        )
+        self.log(
+            f"Installation complete for {result['version']}: client verified; "
+            f"{result['libraries']} libraries; {result['native_files']} native files; "
+            f"{result['verified_assets']} verified asset objects. Game directory: {result['game_directory']}"
+        )
+        self.full_install_worker = None
+
+    def _full_install_failed(self, error):
+        self.version_status.setText("Installation stopped; failed files were not accepted.")
+        self.log(f"Full installation error: {error}")
+        self.full_install_worker = None
+
+    def _full_install_finished(self):
+        self.full_install_button.setEnabled(True)
+        for button in (self.download_button, self.version_json_button, self.library_button,
+                       self.asset_button, self.native_button):
+            button.setEnabled(True)
 
 
     def install_selected_libraries(self):
@@ -960,6 +1140,7 @@ class MainWindow(QMainWindow):
         self.library_button.setEnabled(False)
         self.asset_button.setEnabled(False)
         self.native_button.setEnabled(False)
+        self.full_install_button.setEnabled(False)
         self.version_status.setText("Could not inspect version metadata.")
         self.log(f"Version metadata error: {error}")
         self.metadata_worker = None
