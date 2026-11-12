@@ -909,6 +909,15 @@ class MainWindow(QMainWindow):
         outer.addWidget(content, 1)
         self.setCentralWidget(root)
 
+    def _game_directory_for_version(self, version):
+        root = Path.home() / ".voidex"
+        if self.selected_instance_id:
+            selected = resolve_instance_profile(
+                root / "profiles", str(self.selected_instance_id), str(version)
+            )
+            return Path(selected["game_directory_path"])
+        return root / "instances" / str(version)
+
     def refresh_instance_profiles(self):
         if not hasattr(self, "instance_selector"):
             return
@@ -1647,7 +1656,7 @@ class MainWindow(QMainWindow):
         if not __import__("re").fullmatch(r"\d+\.\d+(?:\.\d+)?", version):
             self.modrinth_status.setText("Enter a valid Minecraft version to inspect its mods folder.")
             return
-        directory = Path.home() / ".voidex" / "instances" / version / "mods"
+        directory = self._game_directory_for_version(version) / "mods"
         try:
             installed = list_installed_mods(directory)
         except (OSError, ValueError) as exc:
@@ -1746,7 +1755,7 @@ class MainWindow(QMainWindow):
         game_version = self.modrinth_game_version.text().strip()
         project = self.modrinth_projects[row]
         loader = self.modrinth_loader.currentData()
-        mods_directory = Path.home() / ".voidex" / "instances" / game_version / "mods"
+        mods_directory = self._game_directory_for_version(game_version) / "mods"
         self.modrinth_install_button.setEnabled(False)
         self.modrinth_search_button.setEnabled(False)
         self.modrinth_status.setText(f"Finding a compatible {loader} build of {project['title']}...")
