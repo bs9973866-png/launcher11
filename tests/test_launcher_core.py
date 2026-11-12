@@ -3,8 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
+import urllib.request
 
-from launcher_core import (download_verified_client, download_verified_version_json,\n                           resolve_library_artifacts, summarize_version_metadata)
+from launcher_core import (download_verified_client, download_verified_library, download_verified_version_json,
+                           resolve_library_artifacts, summarize_version_metadata)
 
 
 def sample_metadata():
@@ -288,6 +290,80 @@ class LibraryResolutionTests(unittest.TestCase):
             "rules": [{"action": "allow", "os": "windows"}],
         }]}
         self.assertEqual(resolve_library_artifacts(metadata), [])
+
+
+class LibraryDownloadTests(unittest.TestCase):
+    def setUp(self):
+        self.payload = b"verified library artifact"
+        self.artifact = {
+            "path": "org/example/demo/1.0/demo-1.0.jar",
+            "url": "https://libraries.minecraft.net/org/example/demo/1.0/demo-1.0.jar",
+            "sha1": hashlib.sha1(self.payload).hexdigest(),
+            "size": len(self.payload),
+            "source": "artifact",
+        }
+
+    def test_downloads_and_verifies_library(self):
+        with tempfile.TemporaryDirectory() as directory:
+            opener = Mock()
+            opener.open.return_value = FakeResponse(self.payload)
+            progress = []
+            result = download_verified_library(
+                self.artifact, directory,
+                progress_callback=lambda done, total: progress.append((done, total)),
+                opener=opener,
+            )
+            self.assertEqual(result.read_bytes(), self.payload)
+            self.assertEqual(progress[-1], (len(self.payload), len(self.payload)))
+
+    def test_reuses_verified_library_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / self.artifact["path"]
+            target.parent.mkdir(parents=True)
+            target.write_bytes(self.payload)
+            opener = Mock()
+            result = download_verified_library(self.artifact, directory, opener=opener)
+            self.assertEqual(result, target)
+            opener.open.assert_not_called()
+
+    def test_hash_mismatch_preserves_old_file_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / self.artifact["path"]
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"old library")
+            bad = dict(self.artifact, sha1="0" * 40)
+            opener = Mock()
+            opener.open.return_value = FakeResponse(self.payload)
+            with self.assertRaisesRegex(ValueError, "SHA-1"):
+                download_verified_library(bad, directory, opener=opener)
+            self.assertEqual(target.read_bytes(), b"old library")
+            self.assertEqual(list(target.parent.glob("*.part")), [])
+
+    def test_rejects_truncated_and_oversized_payloads(self):
+        for expected_size, message in ((len(self.payload) + 1, "Incomplete"),
+                                       (len(self.payload) - 1, "larger")):
+            with self.subTest(expected_size=expected_size), tempfile.TemporaryDirectory() as directory:
+                artifact = dict(self.artifact, size=expected_size)
+                opener = Mock()
+                opener.open.return_value = FakeResponse(self.payload)
+                with self.assertRaisesRegex(ValueError, message):
+                    download_verified_library(artifact, directory, opener=opener)
+
+    def test_rejects_path_escape_before_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = dict(self.artifact, path="../outside.jar")
+            opener = Mock()
+            with self.assertRaisesRegex(ValueError, "relative path|escapes"):
+                download_verified_library(artifact, directory, opener=opener)
+            opener.open.assert_not_called()
+
+    def test_redirect_handler_rejects_different_host_and_http(self):
+        from launcher_core import SameHostLibraryRedirectHandler
+        handler = SameHostLibraryRedirectHandler("libraries.minecraft.net")
+        request = urllib.request.Request(self.artifact["url"])
+        for url in ("https://evil.example/file.jar", "http://libraries.minecraft.net/file.jar"):
+            with self.subTest(url=url), self.assertRaisesRegex(ValueError, "redirected"):
+                handler.redirect_request(request, None, 302, "Found", {}, url)
 
 
 if __name__ == "__main__":
