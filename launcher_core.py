@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 import stat
 import zipfile
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 MANIFEST_HOST = "piston-meta.mojang.com"
 _SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -1332,3 +1332,248 @@ def verify_cached_asset_objects(asset_index_path, objects_root):
         if digest.hexdigest() != artifact["sha1"]:
             raise ValueError(f"Minecraft asset SHA-1 mismatch: {artifact['path']}")
     return {"count": len(artifacts), "index": index}
+
+
+# Modrinth project browser and verified mod downloads.
+MODRINTH_API_HOST = "api.modrinth.com"
+MODRINTH_CDN_HOSTS = {"cdn.modrinth.com"}
+MAX_MODRINTH_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_MODRINTH_MOD_BYTES = 250 * 1024 * 1024
+_MODRINTH_ID_RE = re.compile(r"^[A-Za-z0-9_-]{3,64}$")
+_MODRINTH_SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_MODRINTH_SHA512_RE = re.compile(r"^[0-9a-fA-F]{128}$")
+
+
+def _modrinth_api_json(path, params=None, opener=None):
+    if not isinstance(path, str) or not path.startswith("/") or ".." in path.split("/"):
+        raise ValueError("Invalid Modrinth API path.")
+    query = urlencode(params or {})
+    url = f"https://{MODRINTH_API_HOST}{path}" + (f"?{query}" if query else "")
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname != MODRINTH_API_HOST:
+        raise ValueError("Modrinth API URL is not trusted.")
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "VOIDEX-Launcher/0.6 (mod browser)"}
+    )
+    if opener is None:
+        opener = urllib.request.build_opener()
+    with opener.open(request, timeout=25) as response:
+        payload = response.read(MAX_MODRINTH_RESPONSE_BYTES + 1)
+    if len(payload) > MAX_MODRINTH_RESPONSE_BYTES:
+        raise ValueError("Modrinth API response is unexpectedly large.")
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Modrinth returned invalid JSON.") from exc
+
+
+def search_modrinth_mods(query, game_version, loader="fabric", limit=30, opener=None):
+    """Search Modrinth mod projects compatible with a selected game version and loader."""
+    if not isinstance(query, str) or len(query.strip()) > 120:
+        raise ValueError("Search text must be at most 120 characters.")
+    if not isinstance(game_version, str) or not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", game_version):
+        raise ValueError("Choose a concrete Minecraft release before searching for mods.")
+    if loader not in {"fabric", "forge", "neoforge", "quilt"}:
+        raise ValueError("Unsupported mod loader filter.")
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 50:
+        raise ValueError("Modrinth search limit must be between 1 and 50.")
+    facets = json.dumps([["project_type:mod"], [f"versions:{game_version}"], [f"categories:{loader}"]])
+    payload = _modrinth_api_json(
+        "/v2/search",
+        {"query": query.strip(), "facets": facets, "limit": str(limit), "index": "relevance"},
+        opener=opener,
+    )
+    hits = payload.get("hits") if isinstance(payload, dict) else None
+    if not isinstance(hits, list):
+        raise ValueError("Modrinth search response did not contain a project list.")
+    results = []
+    for hit in hits:
+        if not isinstance(hit, dict) or hit.get("project_type") != "mod":
+            continue
+        project_id = hit.get("project_id")
+        slug = hit.get("slug")
+        title = hit.get("title")
+        if not isinstance(project_id, str) or not _MODRINTH_ID_RE.fullmatch(project_id):
+            continue
+        if not isinstance(slug, str) or not slug or len(slug) > 120:
+            continue
+        if not isinstance(title, str) or not title or len(title) > 160:
+            continue
+        versions = hit.get("versions", [])
+        if not isinstance(versions, list) or game_version not in versions:
+            continue
+        results.append({
+            "project_id": project_id,
+            "slug": slug,
+            "title": title,
+            "description": str(hit.get("description", ""))[:500],
+            "downloads": hit.get("downloads", 0) if isinstance(hit.get("downloads", 0), int) else 0,
+            "icon_url": hit.get("icon_url") if isinstance(hit.get("icon_url"), str) else "",
+            "game_version": game_version,
+            "loader": loader,
+        })
+    return results
+
+
+def fetch_modrinth_compatible_version(project_id, game_version, loader="fabric", opener=None):
+    if not isinstance(project_id, str) or not _MODRINTH_ID_RE.fullmatch(project_id):
+        raise ValueError("Invalid Modrinth project ID.")
+    if not isinstance(game_version, str) or not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", game_version):
+        raise ValueError("Choose a concrete Minecraft release.")
+    if loader not in {"fabric", "forge", "neoforge", "quilt"}:
+        raise ValueError("Unsupported mod loader.")
+    payload = _modrinth_api_json(
+        f"/v2/project/{project_id}/version",
+        {"game_versions": json.dumps([game_version]), "loaders": json.dumps([loader])},
+        opener=opener,
+    )
+    if not isinstance(payload, list):
+        raise ValueError("Modrinth version response is invalid.")
+    for version in payload:
+        if not isinstance(version, dict):
+            continue
+        if game_version not in version.get("game_versions", []):
+            continue
+        if loader not in version.get("loaders", []):
+            continue
+        files = version.get("files")
+        if not isinstance(files, list):
+            continue
+        candidates = []
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            filename = item.get("filename")
+            url = item.get("url")
+            parsed = urlparse(url if isinstance(url, str) else "")
+            size = item.get("size")
+            hashes = item.get("hashes")
+            if (not isinstance(filename, str) or Path(filename).name != filename
+                    or not filename.lower().endswith(".jar")
+                    or parsed.scheme != "https" or parsed.hostname not in MODRINTH_CDN_HOSTS
+                    or parsed.username is not None or parsed.password is not None
+                    or not isinstance(size, int) or isinstance(size, bool)
+                    or size <= 0 or size > MAX_MODRINTH_MOD_BYTES
+                    or not isinstance(hashes, dict)):
+                continue
+            sha1 = hashes.get("sha1")
+            sha512 = hashes.get("sha512")
+            if not ((isinstance(sha1, str) and _MODRINTH_SHA1_RE.fullmatch(sha1))
+                    or (isinstance(sha512, str) and _MODRINTH_SHA512_RE.fullmatch(sha512))):
+                continue
+            candidates.append({
+                "filename": filename, "url": url, "size": size,
+                "sha1": sha1.lower() if isinstance(sha1, str) else None,
+                "sha512": sha512.lower() if isinstance(sha512, str) else None,
+                "primary": bool(item.get("primary")),
+            })
+        if candidates:
+            candidates.sort(key=lambda item: not item["primary"])
+            return {
+                "version_id": version.get("id", ""),
+                "version_name": version.get("name", "Mod version"),
+                "project_id": project_id,
+                "game_version": game_version,
+                "loader": loader,
+                "file": candidates[0],
+            }
+    raise ValueError(f"No {loader} build of this mod is available for Minecraft {game_version}.")
+
+
+class ModrinthRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlparse(newurl)
+        if (parsed.scheme != "https" or parsed.hostname not in MODRINTH_CDN_HOSTS
+                or parsed.username is not None or parsed.password is not None):
+            raise ValueError("Modrinth download redirected to an untrusted host.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def download_verified_modrinth_file(version_info, mods_directory, progress_callback=None, opener=None):
+    if not isinstance(version_info, dict) or not isinstance(version_info.get("file"), dict):
+        raise ValueError("Invalid Modrinth mod version metadata.")
+    item = version_info["file"]
+    filename = item.get("filename")
+    url = item.get("url")
+    parsed = urlparse(url if isinstance(url, str) else "")
+    size = item.get("size")
+    sha1 = item.get("sha1")
+    sha512 = item.get("sha512")
+    if (not isinstance(filename, str) or Path(filename).name != filename
+            or not filename.lower().endswith(".jar")):
+        raise ValueError("Modrinth mod filename is unsafe.")
+    if parsed.scheme != "https" or parsed.hostname not in MODRINTH_CDN_HOSTS:
+        raise ValueError("Modrinth mod URL is not trusted.")
+    if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= MAX_MODRINTH_MOD_BYTES:
+        raise ValueError("Modrinth mod size is invalid.")
+    if not ((isinstance(sha1, str) and _MODRINTH_SHA1_RE.fullmatch(sha1))
+            or (isinstance(sha512, str) and _MODRINTH_SHA512_RE.fullmatch(sha512))):
+        raise ValueError("Modrinth mod checksum is invalid.")
+
+    root = Path(mods_directory).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / filename
+    if target.is_symlink():
+        raise ValueError("Refusing to overwrite a symbolic-link mod file.")
+
+    def matches(path):
+        if not path.is_file() or path.stat().st_size != size:
+            return False
+        if sha512:
+            digest = hashlib.sha512()
+        else:
+            digest = hashlib.sha1()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
+                digest.update(chunk)
+        expected = sha512 or sha1
+        return digest.hexdigest() == expected.lower()
+
+    if matches(target):
+        if progress_callback:
+            progress_callback(size, size)
+        return target
+
+    request = urllib.request.Request(url, headers={"User-Agent": "VOIDEX-Launcher/0.6"})
+    if opener is None:
+        opener = urllib.request.build_opener(ModrinthRedirectHandler())
+    temporary_path = None
+    sha1_digest = hashlib.sha1() if sha1 else None
+    sha512_digest = hashlib.sha512() if sha512 else None
+    downloaded = 0
+    try:
+        with opener.open(request, timeout=35) as response:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=filename + ".", suffix=".part",
+                dir=str(root), delete=False
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                while True:
+                    chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+                    if downloaded > size:
+                        raise ValueError("Downloaded Modrinth file exceeds its published size.")
+                    temporary.write(chunk)
+                    if sha1_digest:
+                        sha1_digest.update(chunk)
+                    if sha512_digest:
+                        sha512_digest.update(chunk)
+                    if progress_callback:
+                        progress_callback(downloaded, size)
+        if downloaded != size:
+            raise ValueError(f"Incomplete Modrinth download: expected {size}, received {downloaded} bytes.")
+        if sha1_digest and sha1_digest.hexdigest() != sha1.lower():
+            raise ValueError("Modrinth mod SHA-1 verification failed.")
+        if sha512_digest and sha512_digest.hexdigest() != sha512.lower():
+            raise ValueError("Modrinth mod SHA-512 verification failed.")
+        os.replace(temporary_path, target)
+        temporary_path = None
+        return target
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
