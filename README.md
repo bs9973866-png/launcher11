@@ -6,6 +6,7 @@ A lightweight, customizable Minecraft Java launcher for Windows, built with Pyth
 
 - Dark cosmic UI with Overview, Versions, Mods, Accounts, Settings and Console pages.
 - On-demand connection to Mojang's official version manifest. The catalog supports searching and filtering releases, snapshots, old beta and old alpha entries.
+- On-demand inspection of a selected version's official Mojang metadata, including Java major-version requirement, client JAR size/checksum, asset index and library count. Metadata URLs and client download hosts are restricted to Mojang HTTPS hosts.
 - Local Minecraft-compatible offline UUID generation from a player nickname.
 - Low-end, Balanced and High-end starting presets, editable RAM allocation, rendering profile and JVM arguments.
 - Settings and the selected version are persisted with Qt settings.
@@ -15,14 +16,14 @@ A lightweight, customizable Minecraft Java launcher for Windows, built with Pyth
 
 This is an active preview, not a finished launcher. The following are not connected yet:
 
-- Minecraft version installation, libraries/assets download and game process launch.
+- Actual Minecraft installation: downloading libraries/assets/client JAR, checksum verification on disk, Java executable discovery/validation and game process launch. The current metadata inspector validates the official metadata only; it does not download or launch the game.
 - Ely.by and Microsoft authentication.
 - Online skin lookup, skin upload and 3D skin preview.
 - Modrinth / CurseForge downloads and mod-loader installation.
 - Streaming Minecraft process output into the console.
 - Signed Windows installer and portable package.
 
-The Launch button intentionally reports that launching is not ready instead of pretending a game was started. Ely.by and Microsoft UUIDs are not fabricated.
+The Launch button intentionally reports that launching is not ready instead of pretending a game was started. The version metadata inspector is a preparatory step, not an installer. Ely.by and Microsoft UUIDs are not fabricated.
 
 ## Requirements
 
@@ -37,6 +38,9 @@ py -m venv .venv
 .venv\\Scripts\\Activate.ps1
 pip install -r requirements.txt
 python main.py
+
+# Run core metadata validation tests
+python -m unittest discover -s tests -v
 ```
 
 ## Build a local preview executable
