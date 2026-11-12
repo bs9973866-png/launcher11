@@ -658,14 +658,14 @@ class TemurinRuntimeTests(unittest.TestCase):
 
     def test_rejects_non_zip_package_metadata(self):
         payload = [{
-            "binaries": [{
+            "binary": {
                 "os": "windows", "architecture": "x64", "image_type": "jdk",
-                "version": {"major": 21},
                 "package": {
                     "link": "https://example.com/temurin.zip",
                     "checksum": "a" * 64, "size": 100, "name": "temurin.zip"
                 }
-            }]
+            },
+            "version": {"major": 21}
         }]
         class Response:
             def __enter__(self): return self
