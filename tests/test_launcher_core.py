@@ -20,7 +20,7 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            search_modrinth_mods, fetch_modrinth_compatible_version,
                            download_verified_modrinth_file, list_installed_mods,
                            remove_installed_mod, fetch_fabric_loader_versions, fetch_forge_loader_versions, _download_forge_installer,
-                           install_fabric_loader, merge_fabric_profile_metadata, merge_forge_profile_metadata)
+                           install_fabric_loader, merge_fabric_profile_metadata, merge_forge_profile_metadata,\n                           fetch_neoforge_loader_versions, _download_neoforge_installer)
 
 
 def sample_metadata():
@@ -1101,6 +1101,84 @@ class ForgeInstallerDownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "version is invalid"):
                 _download_forge_installer("../1.20", "47.3.0", directory, opener=opener)
+        opener.open.assert_not_called()
+
+
+
+
+class NeoForgeCatalogTests(unittest.TestCase):
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+        def read(self, _size=-1):
+            return self.payload
+
+    class Opener:
+        def __init__(self, payload):
+            self.payload = payload
+            self.url = None
+        def open(self, request, timeout=0):
+            self.url = request.full_url
+            return NeoForgeCatalogTests.Response(self.payload)
+
+    def test_filters_maven_versions_for_selected_minecraft_release(self):
+        xml = b"<metadata><versioning><versions><version>21.1.172</version><version>21.1.173-beta</version><version>21.1.171</version><version>20.4.240</version><version>21.11.1</version><version>invalid</version></versions></versioning></metadata>"
+        opener = self.Opener(xml)
+        builds = fetch_neoforge_loader_versions("1.21.1", opener=opener)
+        self.assertEqual([item["version"] for item in builds],
+                         ["21.1.173-beta", "21.1.172", "21.1.171"])
+        self.assertEqual(opener.url,
+                         "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml")
+
+    def test_maps_current_minecraft_version_scheme(self):
+        xml = b"<metadata><versioning><versions><version>26.1.0.100</version></versions></versioning></metadata>"
+        self.assertEqual(fetch_neoforge_loader_versions("26.1", opener=self.Opener(xml))[0]["version"],
+                         "26.1.0.100")
+
+    def test_rejects_minecraft_1201_before_network(self):
+        opener = Mock()
+        with self.assertRaisesRegex(ValueError, "1.20.1"):
+            fetch_neoforge_loader_versions("1.20.1", opener=opener)
+        opener.open.assert_not_called()
+
+    def test_rejects_malformed_maven_xml(self):
+        with self.assertRaisesRegex(ValueError, "invalid Maven metadata"):
+            fetch_neoforge_loader_versions("1.21.1", opener=self.Opener(b"<metadata>"))
+
+    def test_rejects_missing_builds_for_selected_game(self):
+        xml = b"<metadata><versioning><versions><version>20.4.240</version></versions></versioning></metadata>"
+        with self.assertRaisesRegex(ValueError, "no published builds"):
+            fetch_neoforge_loader_versions("1.21.1", opener=self.Opener(xml))
+
+
+class NeoForgeInstallerDownloadTests(unittest.TestCase):
+    def test_downloads_and_verifies_sha256_installer(self):
+        payload = b"neoforge-installer-test"
+        checksum = hashlib.sha256(payload).hexdigest().encode()
+        opener = Mock()
+        opener.open.side_effect = [io.BytesIO(checksum), io.BytesIO(payload)]
+        with tempfile.TemporaryDirectory() as directory:
+            path = _download_neoforge_installer("21.1.172", directory, opener=opener)
+            self.assertEqual(path.name, "neoforge-21.1.172-installer.jar")
+            self.assertEqual(path.read_bytes(), payload)
+
+    def test_rejects_checksum_mismatch_and_cleans_partial_file(self):
+        opener = Mock()
+        opener.open.side_effect = [io.BytesIO(b"0" * 64), io.BytesIO(b"bad installer")]
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "SHA-256 verification"):
+                _download_neoforge_installer("21.1.172", directory, opener=opener)
+            self.assertEqual(list(Path(directory).glob("*.part")), [])
+
+    def test_rejects_invalid_version_before_network(self):
+        opener = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "version is invalid"):
+                _download_neoforge_installer("../latest", directory, opener=opener)
         opener.open.assert_not_called()
 
 
