@@ -5,7 +5,7 @@ from pathlib import Path
 
 from instance_profiles import (
     create_instance_profile, delete_instance_profile, list_instance_profiles,
-    rename_instance_profile, update_instance_profile_loader,
+    rename_instance_profile, update_instance_profile_loader, set_instance_profile_loader_profile,
 )
 
 
@@ -76,6 +76,57 @@ class InstanceProfileTests(unittest.TestCase):
             self.assertEqual(updated["loader"], "fabric")
             self.assertEqual(list_instance_profiles(root)[0]["loader"], "fabric")
             self.assertEqual(world.read_bytes(), b"world")
+
+    def test_loader_profile_binding_is_isolated_per_instance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "profiles"
+            first = create_instance_profile(root, "Fabric Pack", "1.21.8")
+            second = create_instance_profile(root, "Forge Pack", "1.21.8")
+
+            bound = set_instance_profile_loader_profile(
+                root, first["id"], "1.21.8", "fabric",
+                "fabric-loader-0.16.9-1.21.8",
+            )
+
+            self.assertEqual(bound["loader"], "fabric")
+            self.assertEqual(bound["loader_profile_id"], "fabric-loader-0.16.9-1.21.8")
+            resolved_first = __import__("instance_profiles").resolve_instance_profile(
+                root, first["id"], "1.21.8"
+            )
+            resolved_second = __import__("instance_profiles").resolve_instance_profile(
+                root, second["id"], "1.21.8"
+            )
+            self.assertEqual(resolved_first["loader_profile_id"], "fabric-loader-0.16.9-1.21.8")
+            self.assertEqual(resolved_second["loader"], "vanilla")
+            self.assertIsNone(resolved_second["loader_profile_id"])
+
+    def test_loader_change_clears_old_profile_binding(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "profiles"
+            profile = create_instance_profile(root, "Pack", "1.21.8")
+            set_instance_profile_loader_profile(
+                root, profile["id"], "1.21.8", "fabric",
+                "fabric-loader-0.16.9-1.21.8",
+            )
+            update_instance_profile_loader(root, profile["id"], "1.21.8", "forge")
+            resolved = __import__("instance_profiles").resolve_instance_profile(
+                root, profile["id"], "1.21.8"
+            )
+            self.assertEqual(resolved["loader"], "forge")
+            self.assertIsNone(resolved["loader_profile_id"])
+
+    def test_loader_profile_binding_rejects_invalid_id_and_wrong_version(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "profiles"
+            profile = create_instance_profile(root, "Pack", "1.21.8")
+            with self.assertRaisesRegex(ValueError, "version changed"):
+                set_instance_profile_loader_profile(
+                    root, profile["id"], "1.20.1", "fabric", "fabric-loader-1.0"
+                )
+            with self.assertRaisesRegex(ValueError, "profile ID"):
+                set_instance_profile_loader_profile(
+                    root, profile["id"], "1.21.8", "fabric", "../outside"
+                )
 
     def test_loader_update_rejects_wrong_version_and_unknown_loader(self):
         with tempfile.TemporaryDirectory() as temp:
