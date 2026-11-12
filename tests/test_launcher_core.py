@@ -19,7 +19,7 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            search_modrinth_mods, fetch_modrinth_compatible_version,
                            download_verified_modrinth_file, list_installed_mods,
                            remove_installed_mod, fetch_fabric_loader_versions,
-                           merge_fabric_profile_metadata)
+                           install_fabric_loader, merge_fabric_profile_metadata)
 
 
 def sample_metadata():
@@ -855,14 +855,24 @@ class FabricLoaderTests(unittest.TestCase):
 
     def test_fetches_and_validates_fabric_loader_versions(self):
         payload = json.dumps([
-            {"loader": {"version": "0.16.10", "stable": True}},
             {"loader": {"version": "0.17.0-beta.1", "stable": False}},
+            {"loader": {"version": "0.16.10", "stable": True}},
             {"loader": {"version": "../unsafe", "stable": True}},
         ]).encode()
         opener = self.JsonOpener(payload)
         versions = fetch_fabric_loader_versions("1.21.4", opener=opener)
         self.assertEqual([item["version"] for item in versions], ["0.16.10", "0.17.0-beta.1"])
         self.assertEqual(opener.url, "https://meta.fabricmc.net/v2/versions/loader/1.21.4")
+
+
+    def test_installer_rejects_non_java_executable_before_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "not-java.exe"
+            executable.write_bytes(b"not java")
+            with self.assertRaisesRegex(ValueError, "not named java"):
+                install_fabric_loader(
+                    "1.21.4", "0.16.10", executable, Path(directory) / "voidex"
+                )
 
     def test_rejects_invalid_minecraft_version_before_network(self):
         with self.assertRaisesRegex(ValueError, "concrete Minecraft"):
