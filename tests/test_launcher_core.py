@@ -275,5 +275,20 @@ class LibraryResolutionTests(unittest.TestCase):
         self.assertEqual(resolve_library_artifacts(metadata, os_name="windows"), [])
 
 
+    def test_rejects_windows_style_path_separators(self):
+        metadata = {"libraries": [{
+            "downloads": {"artifact": self.artifact("..\\\\outside.jar")}
+        }]}
+        with self.assertRaisesRegex(ValueError, "relative path"):
+            resolve_library_artifacts(metadata)
+
+    def test_malformed_os_rule_does_not_crash_or_allow(self):
+        metadata = {"libraries": [{
+            "downloads": {"artifact": self.artifact("odd.jar")},
+            "rules": [{"action": "allow", "os": "windows"}],
+        }]}
+        self.assertEqual(resolve_library_artifacts(metadata), [])
+
+
 if __name__ == "__main__":
     unittest.main()
