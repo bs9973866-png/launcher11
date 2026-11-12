@@ -21,7 +21,7 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            download_verified_modrinth_file, list_installed_mods,
                            remove_installed_mod, fetch_fabric_loader_versions, fetch_forge_loader_versions, _download_forge_installer,
                            install_fabric_loader, merge_fabric_profile_metadata, merge_forge_profile_metadata,
-                           fetch_neoforge_loader_versions, _download_neoforge_installer, merge_neoforge_profile_metadata, fetch_quilt_loader_versions, fetch_quilt_installer_versions, _download_quilt_installer, install_quilt_loader, merge_quilt_profile_metadata)
+                           fetch_neoforge_loader_versions, _download_neoforge_installer, merge_neoforge_profile_metadata, fetch_quilt_loader_versions, fetch_quilt_installer_versions, _download_quilt_installer, install_quilt_loader, merge_quilt_profile_metadata, install_modrinth_mrpack)
 
 
 def sample_metadata():
@@ -1207,6 +1207,132 @@ class NeoForgeProfileMergeTests(unittest.TestCase):
                          }},
                      }]}, root,
                 )
+
+
+class ModrinthMrpackImportTests(unittest.TestCase):
+    def _archive(self, directory, manifest, overrides=None):
+        path = Path(directory) / "sample.mrpack"
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as package:
+            package.writestr("modrinth.index.json", json.dumps(manifest))
+            for name, payload in (overrides or {}).items():
+                package.writestr("overrides/" + name, payload)
+        return path
+
+    def _manifest(self, files=None, dependencies=None):
+        return {
+            "formatVersion": 1, "game": "minecraft", "name": "Test Pack",
+            "versionId": "test-1", "files": files or [],
+            "dependencies": dependencies or {"minecraft": "1.21.1"},
+        }
+
+    def test_imports_client_overrides_into_version_instance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = self._archive(
+                root, self._manifest(),
+                {"config/test.json": b'{"enabled":true}', "options.txt": b"music:0.5"},
+            )
+            result = install_modrinth_mrpack(archive, root / "voidex")
+            instance = root / "voidex" / "instances" / "1.21.1"
+            self.assertEqual(result["name"], "Test Pack")
+            self.assertEqual(result["files_installed"], 2)
+            self.assertEqual((instance / "config/test.json").read_bytes(), b'{"enabled":true}')
+            self.assertEqual((instance / "options.txt").read_bytes(), b"music:0.5")
+
+    def test_downloads_and_verifies_manifest_files(self):
+        payload = b"sample-mod-jar"
+        item = {
+            "path": "mods/sample.jar", "downloads": ["https://cdn.modrinth.com/data/test.jar"],
+            "fileSize": len(payload),
+            "hashes": {"sha1": hashlib.sha1(payload).hexdigest()},
+            "env": {"client": "required", "server": "unsupported"},
+        }
+        opener = Mock()
+        opener.open.return_value = io.BytesIO(payload)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = self._archive(root, self._manifest([item]))
+            result = install_modrinth_mrpack(
+                archive, root / "voidex", opener=opener
+            )
+            target = root / "voidex" / "instances" / "1.21.1" / "mods" / "sample.jar"
+            self.assertEqual(target.read_bytes(), payload)
+            self.assertEqual(result["files_installed"], 1)
+
+    def test_skips_server_only_files(self):
+        payload = b"server-only"
+        item = {
+            "path": "mods/server.jar", "downloads": ["https://cdn.modrinth.com/data/server.jar"],
+            "fileSize": len(payload), "hashes": {"sha1": hashlib.sha1(payload).hexdigest()},
+            "env": {"client": "unsupported", "server": "required"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = self._archive(root, self._manifest([item]))
+            result = install_modrinth_mrpack(archive, root / "voidex", opener=Mock())
+            self.assertEqual(result["files_installed"], 0)
+
+    def test_rejects_path_traversal_before_writing(self):
+        item = {
+            "path": "../outside.jar", "downloads": ["https://cdn.modrinth.com/data/test.jar"],
+            "fileSize": 4, "hashes": {"sha1": hashlib.sha1(b"test").hexdigest()},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = self._archive(root, self._manifest([item]))
+            with self.assertRaisesRegex(ValueError, "path is unsafe"):
+                install_modrinth_mrpack(archive, root / "voidex", opener=Mock())
+            self.assertFalse((root / "outside.jar").exists())
+
+    def test_rejects_untrusted_download_url(self):
+        payload = b"test"
+        item = {
+            "path": "mods/test.jar", "downloads": ["https://evil.example/test.jar"],
+            "fileSize": len(payload), "hashes": {"sha1": hashlib.sha1(payload).hexdigest()},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = self._archive(root, self._manifest([item]))
+            with self.assertRaisesRegex(ValueError, "untrusted download host"):
+                install_modrinth_mrpack(archive, root / "voidex", opener=Mock())
+
+    def test_rejects_conflicting_existing_file_without_overwriting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            instance = root / "voidex" / "instances" / "1.21.1"
+            instance.mkdir(parents=True)
+            (instance / "options.txt").write_text("user settings", encoding="utf-8")
+            archive = self._archive(root, self._manifest(), {"options.txt": b"pack settings"})
+            with self.assertRaisesRegex(ValueError, "overwrite an existing file"):
+                install_modrinth_mrpack(archive, root / "voidex")
+            self.assertEqual((instance / "options.txt").read_text(encoding="utf-8"), "user settings")
+
+    def test_rejects_unsupported_format_and_multiple_loaders(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bad = self._archive(root, {**self._manifest(), "formatVersion": 2})
+            with self.assertRaisesRegex(ValueError, "Unsupported modpack format"):
+                install_modrinth_mrpack(bad, root / "voidex")
+            bad_loader = self._archive(
+                root, self._manifest(dependencies={
+                    "minecraft": "1.21.1", "fabric-loader": "0.16.0", "quilt-loader": "0.29.0",
+                })
+            )
+            with self.assertRaisesRegex(ValueError, "multiple incompatible loaders"):
+                install_modrinth_mrpack(bad_loader, root / "voidex")
+
+    def test_rejects_zip_symlink_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive_path = root / "symlink.mrpack"
+            with zipfile.ZipFile(archive_path, "w") as package:
+                package.writestr("modrinth.index.json", json.dumps(self._manifest()))
+                info = zipfile.ZipInfo("overrides/link")
+                info.create_system = 3
+                info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                package.writestr(info, "target")
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                install_modrinth_mrpack(archive_path, root / "voidex")
 
 
 class QuiltCatalogTests(unittest.TestCase):
