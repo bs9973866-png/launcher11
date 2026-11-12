@@ -1529,12 +1529,12 @@ def fetch_fabric_loader_versions(game_version, opener=None):
 
 
 FORGE_PROMOTIONS_URL = "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"
-_FORGE_VERSION_RE = re.compile(r"^\\d+\\.\\d+(?:\\.\\d+)?-\\d+\\.\\d+(?:\\.\\d+)?(?:-[A-Za-z0-9_.-]+)?$")
+_FORGE_VERSION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?-\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9_.-]+)?$")
 
 
 def fetch_forge_loader_versions(game_version, opener=None):
     """Return Forge's official recommended/latest builds for one Minecraft release."""
-    if not isinstance(game_version, str) or not re.fullmatch(r"\\d+\\.\\d+(?:\\.\\d+)?", game_version):
+    if not isinstance(game_version, str) or not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", game_version):
         raise ValueError("Choose a concrete Minecraft release for Forge.")
     parsed = urlparse(FORGE_PROMOTIONS_URL)
     if parsed.scheme != "https" or parsed.hostname != "files.minecraftforge.net":
