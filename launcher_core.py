@@ -903,7 +903,13 @@ def build_minecraft_classpath(version_metadata, client_jar, libraries_root,
         if artifact["source"] == "native":
             continue
         relative = Path(artifact["path"])
-        candidate = (library_root / relative).resolve()
+        lexical_candidate = library_root / relative
+        current = lexical_candidate
+        while current != library_root:
+            if current.is_symlink():
+                raise ValueError("Library classpath refuses symbolic-link paths.")
+            current = current.parent
+        candidate = lexical_candidate.resolve()
         try:
             candidate.relative_to(library_root)
         except ValueError as exc:
@@ -912,11 +918,12 @@ def build_minecraft_classpath(version_metadata, client_jar, libraries_root,
             raise ValueError(f"Required Minecraft library is missing: {artifact['path']}")
         classpath_items.append(str(candidate))
 
-    client = Path(client_jar).resolve()
+    client_source = Path(client_jar).expanduser()
+    if client_source.is_symlink():
+        raise ValueError("Minecraft client JAR must not be a symbolic link.")
+    client = client_source.resolve()
     if not client.is_file():
         raise ValueError("Minecraft client JAR is missing.")
-    if client.is_symlink():
-        raise ValueError("Minecraft client JAR must not be a symbolic link.")
     classpath_items.append(str(client))
     separator = path_separator if path_separator is not None else (";" if os_name == "windows" else ":")
     if separator not in {";", ":"}:
