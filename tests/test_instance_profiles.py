@@ -5,6 +5,7 @@ from pathlib import Path
 
 from instance_profiles import (
     create_instance_profile, delete_instance_profile, list_instance_profiles,
+    rename_instance_profile,
 )
 
 
@@ -30,6 +31,35 @@ class InstanceProfileTests(unittest.TestCase):
                 create_instance_profile(Path(temp) / "profiles", "Bad Version", "latest")
             with self.assertRaises(ValueError):
                 create_instance_profile(Path(temp) / "profiles", "Bad Loader", "1.21", "unknown")
+
+    def test_rename_preserves_profile_id_and_game_data(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "profiles"
+            profile = create_instance_profile(root, "Before", "1.21.8", "fabric")
+            game = Path(profile["game_directory_path"])
+            world = game / "saves" / "world.txt"
+            world.parent.mkdir()
+            world.write_text("world", encoding="utf-8")
+
+            renamed = rename_instance_profile(root, profile["id"], "  After   Rename  ")
+
+            self.assertEqual(renamed["id"], profile["id"])
+            self.assertEqual(renamed["name"], "After Rename")
+            self.assertEqual(renamed["game_version"], "1.21.8")
+            self.assertEqual(renamed["loader"], "fabric")
+            self.assertEqual(list_instance_profiles(root)[0]["name"], "After Rename")
+            self.assertEqual(world.read_text(encoding="utf-8"), "world")
+
+    def test_rename_rejects_duplicate_or_invalid_names(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "profiles"
+            first = create_instance_profile(root, "Alpha", "1.21")
+            second = create_instance_profile(root, "Beta", "1.21")
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                rename_instance_profile(root, second["id"], "alpha")
+            with self.assertRaises(ValueError):
+                rename_instance_profile(root, second["id"], "../outside")
+            self.assertEqual(list_instance_profiles(root)[1]["name"], "Beta")
 
     def test_delete_keeps_game_data_by_default(self):
         with tempfile.TemporaryDirectory() as temp:
