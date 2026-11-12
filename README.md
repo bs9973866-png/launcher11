@@ -42,7 +42,7 @@ py -m venv .venv
 pip install -r requirements.txt
 python main.py
 
-# Run core metadata validation tests
+# Run core validation and library-resolution tests
 python -m unittest discover -s tests -v
 ```
 
