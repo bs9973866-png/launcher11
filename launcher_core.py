@@ -853,13 +853,13 @@ def _launch_rules_allow(rules, os_name, arch, features):
 def _expand_launch_argument(value, placeholders):
     if not isinstance(value, str):
         raise ValueError("Minecraft launch arguments must be strings.")
-    pattern = re.compile(r"\\$\\{([^}]+)\\}")
+    pattern = re.compile(r"\$\{([^}]+)\}")
     expanded = pattern.sub(
         lambda match: str(placeholders[match.group(1)])
         if match.group(1) in placeholders else match.group(0),
         value,
     )
-    unresolved = re.findall(r"\\$\\{([^}]+)\\}", expanded)
+    unresolved = re.findall(r"\$\{([^}]+)\}", expanded)
     if unresolved:
         raise ValueError("Unresolved Minecraft launch placeholder(s): " + ", ".join(sorted(set(unresolved))))
     return expanded
