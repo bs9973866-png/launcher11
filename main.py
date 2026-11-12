@@ -574,6 +574,11 @@ class LaunchCheckWorker(QThread):
                 metadata = json.load(stream)
             if metadata.get("id") != self.version_id:
                 raise ValueError("Cached version JSON does not match the selected version.")
+            if self.fabric_profile_id and self.forge_profile_id:
+                raise ValueError(
+                    "Both Fabric and Forge profiles are selected for this Minecraft version. "
+                    "Keep only one loader profile active before launching."
+                )
             if self.fabric_profile_id:
                 profile_path = home / "versions" / self.fabric_profile_id / f"{self.fabric_profile_id}.json"
                 if profile_path.is_symlink() or not profile_path.is_file():
