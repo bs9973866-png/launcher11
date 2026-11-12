@@ -484,3 +484,49 @@ def download_verified_library(artifact, libraries_root, progress_callback=None, 
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def download_verified_libraries(artifacts, libraries_root, progress_callback=None, opener_factory=None):
+    """Download a list of resolved artifacts sequentially with aggregate byte progress.
+
+    progress_callback receives (completed_bytes, total_bytes, current_relative_path).
+    The operation is intentionally sequential for predictable resource use and simple
+    failure handling. Previously verified files are reused by download_verified_library.
+    """
+    if not isinstance(artifacts, (list, tuple)):
+        raise ValueError("Library artifacts must be a list.")
+    validated = []
+    seen = {}
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            raise ValueError("Invalid library artifact in download list.")
+        item = _validated_library_artifact(
+            {key: artifact.get(key) for key in ("path", "url", "sha1", "size")},
+            artifact.get("source", "artifact"),
+        )
+        previous = seen.get(item["path"])
+        if previous is not None:
+            if previous != (item["sha1"], item["size"], item["url"]):
+                raise ValueError("Conflicting library artifacts use the same destination path.")
+            continue
+        seen[item["path"]] = (item["sha1"], item["size"], item["url"])
+        validated.append({**item, "source": artifact.get("source", "artifact")})
+
+    total = sum(item["size"] for item in validated)
+    completed = 0
+    results = []
+    for item in validated:
+        opener = opener_factory(item) if opener_factory else None
+
+        def report(done, _item_total, path=item["path"]):
+            if progress_callback:
+                progress_callback(completed + done, total, path)
+
+        result = download_verified_library(
+            item, libraries_root, progress_callback=report, opener=opener
+        )
+        completed += item["size"]
+        results.append(result)
+        if progress_callback:
+            progress_callback(completed, total, item["path"])
+    return results
