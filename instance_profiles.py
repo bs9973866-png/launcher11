@@ -86,6 +86,7 @@ def create_instance_profile(root, name, game_version, loader="vanilla") -> dict:
         "name": name,
         "game_version": game_version,
         "loader": loader,
+        "loader_profile_id": None,
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "game_directory": "game",
     }
@@ -133,6 +134,12 @@ def list_instance_profiles(root) -> list[dict]:
         data["game_version"] = _validate_version(data.get("game_version"))
         if data.get("loader") not in _ALLOWED_LOADERS:
             raise ValueError(f"Instance profile loader is invalid: {directory.name}")
+        loader_profile_id = data.get("loader_profile_id")
+        if loader_profile_id is not None and (
+            not isinstance(loader_profile_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.+-]{1,160}", loader_profile_id)
+        ):
+            raise ValueError(f"Instance loader profile ID is invalid: {directory.name}")
         game_rel = data.get("game_directory")
         if game_rel != "game":
             raise ValueError(f"Instance profile game directory is invalid: {directory.name}")
@@ -199,6 +206,8 @@ def update_instance_profile_loader(root, profile_id, expected_game_version, load
         raise ValueError("Instance Minecraft version changed during the operation.")
     if data.get("game_directory") != "game":
         raise ValueError("Instance profile game directory is invalid.")
+    if data.get("loader") != loader:
+        data["loader_profile_id"] = None
     data["loader"] = loader
     temporary = directory / "profile.json.tmp"
     try:
@@ -213,6 +222,47 @@ def update_instance_profile_loader(root, profile_id, expected_game_version, load
         raise
     return {**data, "directory": str(directory),
             "game_directory_path": str(directory / "game")}
+
+def set_instance_profile_loader_profile(root, profile_id, expected_game_version,
+                                          loader, loader_profile_id) -> dict:
+    """Bind a validated installed loader profile to exactly one named instance."""
+    root_path = _safe_root(root)
+    profile_id = _validate_profile_id(profile_id)
+    expected_game_version = _validate_version(expected_game_version)
+    if loader not in {"fabric", "forge", "neoforge", "quilt"}:
+        raise ValueError("A named loader profile requires a supported non-vanilla loader.")
+    if (not isinstance(loader_profile_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.+-]{1,160}", loader_profile_id)):
+        raise ValueError("Installed loader profile ID is invalid.")
+    directory = _profile_directory(root_path, profile_id)
+    metadata = directory / "profile.json"
+    if not directory.is_dir() or metadata.is_symlink() or not metadata.is_file():
+        raise ValueError("Instance profile does not exist or is unsafe.")
+    with metadata.open("r", encoding="utf-8") as stream:
+        data = json.load(stream)
+    if (not isinstance(data, dict) or data.get("schema") != _PROFILE_SCHEMA
+            or data.get("id") != profile_id):
+        raise ValueError("Instance profile metadata does not match its directory.")
+    if _validate_version(data.get("game_version")) != expected_game_version:
+        raise ValueError("Instance Minecraft version changed during the operation.")
+    if data.get("game_directory") != "game":
+        raise ValueError("Instance profile game directory is invalid.")
+    data["loader"] = loader
+    data["loader_profile_id"] = loader_profile_id
+    temporary = directory / "profile.json.tmp"
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.write("\\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, metadata)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return {**data, "directory": str(directory),
+            "game_directory_path": str(directory / "game")}
+
 
 def delete_instance_profile(root, profile_id, *, delete_game_data=False) -> dict:
     """Remove profile metadata; game data is preserved unless explicitly requested."""
@@ -273,5 +323,6 @@ def resolve_instance_profile(root, profile_id, expected_game_version=None):
         "name": _validate_profile_name(data.get("name")),
         "game_version": version,
         "loader": data["loader"],
+        "loader_profile_id": data.get("loader_profile_id"),
         "game_directory_path": str(resolved),
     }
