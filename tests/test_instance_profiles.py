@@ -127,6 +127,11 @@ class InstanceProfileTests(unittest.TestCase):
                 set_instance_profile_loader_profile(
                     root, profile["id"], "1.21.8", "fabric", "../outside"
                 )
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                set_instance_profile_loader_profile(
+                    root, profile["id"], "1.21.8", "forge",
+                    "fabric-loader-0.16.9-1.21.8"
+                )
 
     def test_loader_update_rejects_wrong_version_and_unknown_loader(self):
         with tempfile.TemporaryDirectory() as temp:
