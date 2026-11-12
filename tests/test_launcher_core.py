@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from launcher_core import download_verified_client, download_verified_version_json, summarize_version_metadata
+from launcher_core import (download_verified_client, download_verified_version_json,\n                           resolve_library_artifacts, summarize_version_metadata)
 
 
 def sample_metadata():
@@ -196,6 +196,83 @@ class VersionJsonCacheTests(unittest.TestCase):
                 )
             self.assertEqual(target.read_bytes(), b"previous")
             self.assertEqual(list(Path(directory).glob("*.part")), [])
+
+
+class LibraryResolutionTests(unittest.TestCase):
+    def artifact(self, path):
+        return {
+            "path": path,
+            "url": "https://libraries.minecraft.net/" + path,
+            "sha1": "b" * 40,
+            "size": 456,
+        }
+
+    def test_resolves_artifacts_and_windows_native_classifier(self):
+        metadata = {"libraries": [{
+            "name": "example:library:1.0",
+            "downloads": {
+                "artifact": self.artifact("example/library/1.0/library-1.0.jar"),
+                "classifiers": {
+                    "natives-windows-64": self.artifact("example/library/1.0/library-1.0-natives-windows.jar")
+                },
+            },
+            "natives": {"windows": "natives-windows-\u0024{arch}"},
+        }]}
+        resolved = resolve_library_artifacts(metadata)
+        self.assertEqual(len(resolved), 2)
+        self.assertEqual({item["source"] for item in resolved}, {"artifact", "native"})
+
+    def test_applies_allow_and_disallow_rules_in_order(self):
+        metadata = {"libraries": [
+            {"downloads": {"artifact": self.artifact("allowed.jar")},
+             "rules": [{"action": "allow", "os": {"name": "windows"}}]},
+            {"downloads": {"artifact": self.artifact("blocked.jar")},
+             "rules": [{"action": "allow"}, {"action": "disallow", "os": {"name": "windows"}}]},
+            {"downloads": {"artifact": self.artifact("linux.jar")},
+             "rules": [{"action": "allow", "os": {"name": "linux"}}]},
+        ]}
+        self.assertEqual(
+            [item["path"] for item in resolve_library_artifacts(metadata)],
+            ["allowed.jar"],
+        )
+
+    def test_feature_rules_default_to_false(self):
+        metadata = {"libraries": [{
+            "downloads": {"artifact": self.artifact("demo.jar")},
+            "rules": [{"action": "allow", "features": {"is_demo_user": True}}],
+        }]}
+        self.assertEqual(resolve_library_artifacts(metadata), [])
+        self.assertEqual(
+            len(resolve_library_artifacts(metadata, features={"is_demo_user": True})), 1
+        )
+
+    def test_rejects_path_traversal_and_non_https(self):
+        for bad_path, bad_url in [
+            ("../outside.jar", "https://libraries.minecraft.net/file.jar"),
+            ("safe.jar", "http://libraries.minecraft.net/file.jar"),
+        ]:
+            metadata = {"libraries": [{
+                "downloads": {"artifact": {
+                    **self.artifact(bad_path), "url": bad_url
+                }}
+            }]}
+            with self.assertRaises(ValueError):
+                resolve_library_artifacts(metadata)
+
+    def test_rejects_bad_checksum_and_size(self):
+        for changes in ({"sha1": "bad"}, {"size": 0}):
+            artifact = {**self.artifact("lib.jar"), **changes}
+            with self.assertRaises(ValueError):
+                resolve_library_artifacts({"libraries": [{
+                    "downloads": {"artifact": artifact}
+                }]})
+
+    def test_ignores_library_not_allowed_for_target_os(self):
+        metadata = {"libraries": [{
+            "downloads": {"artifact": self.artifact("mac.jar")},
+            "rules": [{"action": "allow", "os": {"name": "osx"}}],
+        }]}
+        self.assertEqual(resolve_library_artifacts(metadata, os_name="windows"), [])
 
 
 if __name__ == "__main__":
