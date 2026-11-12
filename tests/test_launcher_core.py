@@ -21,7 +21,7 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            download_verified_modrinth_file, list_installed_mods,
                            remove_installed_mod, fetch_fabric_loader_versions, fetch_forge_loader_versions, _download_forge_installer,
                            install_fabric_loader, merge_fabric_profile_metadata, merge_forge_profile_metadata,
-                           fetch_neoforge_loader_versions, _download_neoforge_installer)
+                           fetch_neoforge_loader_versions, _download_neoforge_installer, merge_neoforge_profile_metadata)
 
 
 def sample_metadata():
@@ -1105,6 +1105,91 @@ class ForgeInstallerDownloadTests(unittest.TestCase):
         opener.open.assert_not_called()
 
 
+
+
+class NeoForgeProfileMergeTests(unittest.TestCase):
+    def test_merges_profile_and_validates_installed_maven_library(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            relative = Path("net/neoforged/fmlcore/1.0/fmlcore-1.0.jar")
+            target = root / relative
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"neoforge-core")
+            base = {
+                "id": "1.21.1", "mainClass": "net.minecraft.client.main.Main",
+                "libraries": [], "arguments": {"jvm": ["-Dvanilla=true"], "game": ["--demo"]},
+                "javaVersion": {"majorVersion": 21},
+            }
+            profile = {
+                "id": "1.21.1-neoforge-21.1.172", "inheritsFrom": "1.21.1",
+                "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+                "libraries": [{"name": "net.neoforged:fmlcore:1.0",
+                               "url": "https://maven.neoforged.net/releases/"}],
+                "arguments": {"jvm": ["-Dneoforge=true"], "game": ["--fml.neoForgeVersion", "21.1.172"]},
+            }
+            merged = merge_neoforge_profile_metadata(base, profile, root)
+            self.assertEqual(merged["id"], profile["id"])
+            self.assertEqual(merged["mainClass"], profile["mainClass"])
+            self.assertEqual(merged["javaVersion"], {"majorVersion": 21})
+            self.assertEqual(merged["arguments"]["jvm"], ["-Dvanilla=true", "-Dneoforge=true"])
+            artifact = merged["libraries"][0]["downloads"]["artifact"]
+            self.assertEqual(artifact["path"], relative.as_posix())
+            self.assertEqual(artifact["sha1"], hashlib.sha1(b"neoforge-core").hexdigest())
+
+    def test_rejects_profile_for_another_minecraft_version(self):
+        with self.assertRaisesRegex(ValueError, "does not inherit"):
+            merge_neoforge_profile_metadata(
+                {"id": "1.21.1", "libraries": []},
+                {"id": "1.21.1-neoforge-21.1.172", "inheritsFrom": "1.20.4",
+                 "mainClass": "example.Main", "libraries": []}, Path("."),
+            )
+
+    def test_rejects_missing_library(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "library is missing"):
+                merge_neoforge_profile_metadata(
+                    {"id": "1.21.1", "libraries": []},
+                    {"id": "1.21.1-neoforge-21.1.172", "inheritsFrom": "1.21.1",
+                     "mainClass": "example.Main",
+                     "libraries": [{"name": "net.neoforged:fmlcore:1.0"}]}, Path(directory),
+                )
+
+    def test_rejects_untrusted_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "net/example/demo/1.0/demo-1.0.jar"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"demo")
+            with self.assertRaisesRegex(ValueError, "repository is not trusted"):
+                merge_neoforge_profile_metadata(
+                    {"id": "1.21.1", "libraries": []},
+                    {"id": "1.21.1-neoforge-21.1.172", "inheritsFrom": "1.21.1",
+                     "mainClass": "example.Main",
+                     "libraries": [{"name": "net.example:demo:1.0",
+                                    "url": "https://evil.example/"}]}, root,
+                )
+
+    def test_rejects_explicit_artifact_checksum_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "net/neoforged/fmlcore/1.0/fmlcore-1.0.jar"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "SHA-1 mismatch"):
+                merge_neoforge_profile_metadata(
+                    {"id": "1.21.1", "libraries": []},
+                    {"id": "1.21.1-neoforge-21.1.172", "inheritsFrom": "1.21.1",
+                     "mainClass": "example.Main",
+                     "libraries": [{
+                         "name": "net.neoforged:fmlcore:1.0",
+                         "downloads": {"artifact": {
+                             "path": "net/neoforged/fmlcore/1.0/fmlcore-1.0.jar",
+                             "url": "https://maven.neoforged.net/releases/net/neoforged/fmlcore/1.0/fmlcore-1.0.jar",
+                             "sha1": hashlib.sha1(b"original").hexdigest(),
+                             "size": len(b"changed"),
+                         }},
+                     }]}, root,
+                )
 
 
 class NeoForgeCatalogTests(unittest.TestCase):
