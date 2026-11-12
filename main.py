@@ -17,7 +17,7 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             install_temurin_runtime, search_modrinth_mods,
                             fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod,
                             fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata,
-                            fetch_forge_loader_versions, install_forge_loader, merge_forge_profile_metadata)
+                            fetch_forge_loader_versions, install_forge_loader, merge_forge_profile_metadata,\n                            fetch_neoforge_loader_versions, install_neoforge_loader)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -153,6 +153,44 @@ class ForgeInstallWorker(QThread):
     def run(self):
         try:
             result = install_forge_loader(
+                self.game_version, self.loader_version, self.java_executable,
+                self.voidex_root, progress_callback=self.stage.emit,
+            )
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class NeoForgeVersionsWorker(QThread):
+    loaded = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, game_version, parent=None):
+        super().__init__(parent)
+        self.game_version = game_version
+
+    def run(self):
+        try:
+            self.loaded.emit(fetch_neoforge_loader_versions(self.game_version))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class NeoForgeInstallWorker(QThread):
+    stage = Signal(str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, game_version, loader_version, java_executable, voidex_root, parent=None):
+        super().__init__(parent)
+        self.game_version = game_version
+        self.loader_version = loader_version
+        self.java_executable = java_executable
+        self.voidex_root = voidex_root
+
+    def run(self):
+        try:
+            result = install_neoforge_loader(
                 self.game_version, self.loader_version, self.java_executable,
                 self.voidex_root, progress_callback=self.stage.emit,
             )
@@ -699,6 +737,10 @@ class MainWindow(QMainWindow):
         self.fabric_versions_worker = None
         self.forge_versions_worker = None
         self.forge_install_worker = None
+        self.neoforge_versions_worker = None
+        self.neoforge_install_worker = None
+        self.neoforge_profile_id = self.settings.value("neoforge_profile_id", "")
+        self.neoforge_profile_game_version = self.settings.value("neoforge_profile_game_version", "")
         self.forge_profile_id = self.settings.value("forge_profile_id", "")
         self.forge_profile_game_version = self.settings.value("forge_profile_game_version", "")
         self.fabric_install_worker = None
@@ -899,6 +941,23 @@ class MainWindow(QMainWindow):
         forge_row.addWidget(self.forge_install_button)
         layout.addLayout(forge_row)
         layout.addWidget(self.forge_status)
+
+        neoforge_row = QHBoxLayout()
+        self.neoforge_loader_version = QComboBox()
+        self.neoforge_loader_version.setMinimumWidth(150)
+        self.neoforge_versions_button = QPushButton("Load NeoForge builds")
+        self.neoforge_versions_button.clicked.connect(self.load_neoforge_versions)
+        self.neoforge_install_button = QPushButton("Install NeoForge")
+        self.neoforge_install_button.clicked.connect(self.install_selected_neoforge)
+        self.neoforge_status = QLabel("NeoForge installer downloads use official Maven SHA-256 verification.")
+        self.neoforge_status.setObjectName("Muted")
+        self.neoforge_status.setWordWrap(True)
+        neoforge_row.addWidget(QLabel("NeoForge build"))
+        neoforge_row.addWidget(self.neoforge_loader_version)
+        neoforge_row.addWidget(self.neoforge_versions_button)
+        neoforge_row.addWidget(self.neoforge_install_button)
+        layout.addLayout(neoforge_row)
+        layout.addWidget(self.neoforge_status)
         self.modrinth_search_button = QPushButton("Search Modrinth")
         self.modrinth_search_button.clicked.connect(self.search_modrinth)
         controls.addWidget(self.modrinth_search, 2)
@@ -948,7 +1007,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.installed_mods_table, 1)
 
         warning = QLabel(
-            "Fabric installation is supported; official Forge build discovery is available. Forge installation, NeoForge and Quilt are not available yet. "
+            "Fabric and Forge installation are supported. NeoForge can be installed from its official Maven repository; its launch-profile integration is the next step. "
             "Mods must match the selected Minecraft version and installed loader."
         )
         warning.setObjectName("Muted")
@@ -1016,6 +1075,91 @@ class MainWindow(QMainWindow):
     def _forge_versions_finished(self):
         self.forge_versions_button.setEnabled(True)
         self.forge_versions_worker = None
+
+
+    def load_neoforge_versions(self):
+        if self.neoforge_versions_worker and self.neoforge_versions_worker.isRunning():
+            return
+        game_version = self.modrinth_game_version.text().strip()
+        self.neoforge_versions_button.setEnabled(False)
+        self.neoforge_status.setText(f"Loading official NeoForge builds for Minecraft {game_version}...")
+        self.neoforge_versions_worker = NeoForgeVersionsWorker(game_version, self)
+        self.neoforge_versions_worker.loaded.connect(self._neoforge_versions_loaded)
+        self.neoforge_versions_worker.failed.connect(self._neoforge_versions_failed)
+        self.neoforge_versions_worker.finished.connect(self._neoforge_versions_finished)
+        self.neoforge_versions_worker.start()
+
+    def _neoforge_versions_loaded(self, versions):
+        self.neoforge_loader_version.clear()
+        for item in versions:
+            self.neoforge_loader_version.addItem(
+                f"{item['version']} ({item['channel']})", item["version"]
+            )
+        self.neoforge_status.setText(
+            f"Found {len(versions)} official NeoForge build(s), newest first."
+        )
+
+    def _neoforge_versions_failed(self, error):
+        self.neoforge_status.setText(f"NeoForge catalog lookup failed: {error}")
+        self.log(f"NeoForge catalog lookup failed: {error}")
+
+    def _neoforge_versions_finished(self):
+        self.neoforge_versions_button.setEnabled(True)
+        self.neoforge_versions_worker = None
+
+    def install_selected_neoforge(self):
+        if self.neoforge_install_worker and self.neoforge_install_worker.isRunning():
+            return
+        game_version = self.modrinth_game_version.text().strip()
+        loader_version = self.neoforge_loader_version.currentData()
+        java_executable = self.java_path.text().strip()
+        if not loader_version:
+            self.neoforge_status.setText("Load and select a NeoForge build first.")
+            return
+        if not java_executable:
+            self.neoforge_status.setText("Set a Java executable in Settings before installing NeoForge.")
+            self._navigate(4)
+            return
+        if game_version != self.selected_version:
+            QMessageBox.information(
+                self, "VOIDEX",
+                "The Mods page version must match the selected Minecraft version. Select it on the Versions page first."
+            )
+            return
+        self.neoforge_install_button.setEnabled(False)
+        self.neoforge_versions_button.setEnabled(False)
+        self.neoforge_status.setText("Preparing official NeoForge installer...")
+        self.neoforge_install_worker = NeoForgeInstallWorker(
+            game_version, loader_version, java_executable, Path.home() / ".voidex", self
+        )
+        self.neoforge_install_worker.stage.connect(self._neoforge_install_stage)
+        self.neoforge_install_worker.completed.connect(self._neoforge_install_completed)
+        self.neoforge_install_worker.failed.connect(self._neoforge_install_failed)
+        self.neoforge_install_worker.finished.connect(self._neoforge_install_finished)
+        self.neoforge_install_worker.start()
+        self.log(f"Installing NeoForge {loader_version} for Minecraft {game_version}.")
+
+    def _neoforge_install_stage(self, stage):
+        self.neoforge_status.setText(stage)
+
+    def _neoforge_install_completed(self, result):
+        self.neoforge_profile_id = result["profile_id"]
+        self.neoforge_profile_game_version = result["game_version"]
+        self.settings.setValue("neoforge_profile_id", self.neoforge_profile_id)
+        self.settings.setValue("neoforge_profile_game_version", self.neoforge_profile_game_version)
+        self.neoforge_status.setText(
+            f"NeoForge profile installed: {self.neoforge_profile_id}. Launch integration is the next step."
+        )
+        self.log(f"NeoForge profile installed and validated: {self.neoforge_profile_id}")
+
+    def _neoforge_install_failed(self, error):
+        self.neoforge_status.setText(f"NeoForge installation failed: {error}")
+        self.log(f"NeoForge installation failed: {error}")
+
+    def _neoforge_install_finished(self):
+        self.neoforge_install_button.setEnabled(True)
+        self.neoforge_versions_button.setEnabled(True)
+        self.neoforge_install_worker = None
 
 
     def install_selected_forge(self):
