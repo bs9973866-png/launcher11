@@ -264,7 +264,9 @@ def _library_rule_matches(rule, os_name, arch, features):
     if not isinstance(rule, dict):
         return False
     os_rule = rule.get("os", {})
-    if os_rule and not isinstance(os_rule, dict):
+    if os_rule is None:
+        os_rule = {}
+    if not isinstance(os_rule, dict):
         return False
     if os_rule.get("name") and os_rule["name"] != os_name:
         return False
@@ -273,8 +275,11 @@ def _library_rule_matches(rule, os_name, arch, features):
         actual = {"x86_64": "amd64", "x86": "x86"}.get(arch, arch)
         if expected not in {actual, arch}:
             return False
-    for feature, expected in (rule.get("features") or {}).items():
-        if features.get(feature, False) != expected:
+    rule_features = rule.get("features") or {}
+    if not isinstance(rule_features, dict):
+        return False
+    for feature, expected in rule_features.items():
+        if not isinstance(expected, bool) or features.get(feature, False) != expected:
             return False
     return True
 
@@ -298,7 +303,7 @@ def _validated_library_artifact(artifact, source):
     if not isinstance(artifact, dict):
         raise ValueError("Library artifact metadata must be an object.")
     path = artifact.get("path")
-    if not isinstance(path, str) or not path or "\\\\" in path:
+    if not isinstance(path, str) or not path or "\\" in path:
         raise ValueError("Library artifact has an invalid relative path.")
     relative = Path(path)
     if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
