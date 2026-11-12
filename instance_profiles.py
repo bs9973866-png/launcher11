@@ -178,6 +178,42 @@ def rename_instance_profile(root, profile_id, new_name) -> dict:
     return {**data, "directory": str(directory),
             "game_directory_path": str(directory / "game")}
 
+
+def update_instance_profile_loader(root, profile_id, expected_game_version, loader) -> dict:
+    """Update the recorded loader only when the profile identity/version still match."""
+    root_path = _safe_root(root)
+    profile_id = _validate_profile_id(profile_id)
+    expected_game_version = _validate_version(expected_game_version)
+    if loader not in _ALLOWED_LOADERS:
+        raise ValueError("Unsupported instance profile loader.")
+    directory = _profile_directory(root_path, profile_id)
+    metadata = directory / "profile.json"
+    if not directory.is_dir() or metadata.is_symlink() or not metadata.is_file():
+        raise ValueError("Instance profile does not exist or is unsafe.")
+    with metadata.open("r", encoding="utf-8") as stream:
+        data = json.load(stream)
+    if (not isinstance(data, dict) or data.get("schema") != _PROFILE_SCHEMA
+            or data.get("id") != profile_id):
+        raise ValueError("Instance profile metadata does not match its directory.")
+    if _validate_version(data.get("game_version")) != expected_game_version:
+        raise ValueError("Instance Minecraft version changed during the operation.")
+    if data.get("game_directory") != "game":
+        raise ValueError("Instance profile game directory is invalid.")
+    data["loader"] = loader
+    temporary = directory / "profile.json.tmp"
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.write("\\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, metadata)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return {**data, "directory": str(directory),
+            "game_directory_path": str(directory / "game")}
+
 def delete_instance_profile(root, profile_id, *, delete_game_data=False) -> dict:
     """Remove profile metadata; game data is preserved unless explicitly requested."""
     root_path = _safe_root(root)
