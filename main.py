@@ -19,7 +19,7 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata,
                             fetch_forge_loader_versions, install_forge_loader, merge_forge_profile_metadata,
                             fetch_neoforge_loader_versions, install_neoforge_loader, merge_neoforge_profile_metadata,
-                            fetch_quilt_loader_versions, install_quilt_loader)
+                            fetch_quilt_loader_versions, install_quilt_loader, merge_quilt_profile_metadata)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -620,12 +620,13 @@ class LaunchCheckWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, version_id, manifest_entry, java_executable, ram_mb,
-                 extra_jvm, account_source, nickname, fabric_profile_id=None, forge_profile_id=None, neoforge_profile_id=None, parent=None):
+                 extra_jvm, account_source, nickname, fabric_profile_id=None, forge_profile_id=None, neoforge_profile_id=None, quilt_profile_id=None, parent=None):
         super().__init__(parent)
         self.version_id = version_id
         self.fabric_profile_id = fabric_profile_id
         self.forge_profile_id = forge_profile_id
         self.neoforge_profile_id = neoforge_profile_id
+        self.quilt_profile_id = quilt_profile_id
         self.manifest_entry = dict(manifest_entry)
         self.java_executable = java_executable
         self.ram_mb = ram_mb
@@ -658,6 +659,7 @@ class LaunchCheckWorker(QThread):
                     ("Fabric", self.fabric_profile_id),
                     ("Forge", self.forge_profile_id),
                     ("NeoForge", self.neoforge_profile_id),
+                    ("Quilt", self.quilt_profile_id),
                 ) if profile_id
             ]
             if len(active_loaders) > 1:
@@ -686,6 +688,13 @@ class LaunchCheckWorker(QThread):
                 with profile_path.open("r", encoding="utf-8") as stream:
                     neoforge_profile = json.load(stream)
                 metadata = merge_neoforge_profile_metadata(metadata, neoforge_profile, home / "libraries")
+            if self.quilt_profile_id:
+                profile_path = home / "versions" / self.quilt_profile_id / f"{self.quilt_profile_id}.json"
+                if profile_path.is_symlink() or not profile_path.is_file():
+                    raise ValueError("Installed Quilt profile is missing. Reinstall Quilt from the Mods page.")
+                with profile_path.open("r", encoding="utf-8") as stream:
+                    quilt_profile = json.load(stream)
+                metadata = merge_quilt_profile_metadata(metadata, quilt_profile, home / "libraries")
 
             client = home / "cache" / "clients" / f"{self.version_id}.jar"
             client_ref = (metadata.get("downloads") or {}).get("client") or {}
@@ -1084,7 +1093,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.installed_mods_table, 1)
 
         warning = QLabel(
-            "Fabric, Forge and NeoForge installation and launch integration are supported. Quilt can be installed from the official Quilt Meta catalog; launch integration is the next step. "
+            "Fabric, Forge, NeoForge and Quilt installation and launch integration are supported. "
             "Mods must match the selected Minecraft version and installed loader."
         )
         warning.setObjectName("Muted")
@@ -1224,7 +1233,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("quilt_profile_id", self.quilt_profile_id)
         self.settings.setValue("quilt_profile_game_version", self.quilt_profile_game_version)
         self.quilt_status.setText(
-            f"Quilt profile installed: {self.quilt_profile_id}. Launch integration is next."
+            f"Quilt profile installed and ready for launch: {self.quilt_profile_id}."
         )
         self.log(f"Quilt profile installed and validated: {self.quilt_profile_id}")
 
@@ -2317,7 +2326,8 @@ class MainWindow(QMainWindow):
             self.account_source.currentText(), self.player_name.text().strip(),
             self.fabric_profile_id if self.fabric_profile_game_version == self.selected_version else None,
             self.forge_profile_id if self.forge_profile_game_version == self.selected_version else None,
-            self.neoforge_profile_id if self.neoforge_profile_game_version == self.selected_version else None, self,
+            self.neoforge_profile_id if self.neoforge_profile_game_version == self.selected_version else None,
+            self.quilt_profile_id if self.quilt_profile_game_version == self.selected_version else None, self,
         )
         self.launch_worker.ready.connect(self._launch_plan_ready)
         self.launch_worker.failed.connect(self._launch_plan_failed)
