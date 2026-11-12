@@ -162,6 +162,53 @@ class LibraryInstallWorker(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+class AssetInstallWorker(QThread):
+    progress = Signal(int, int, str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, version_metadata_url, version_sha1, version_json_path, assets_root, parent=None):
+        super().__init__(parent)
+        self.version_metadata_url = version_metadata_url
+        self.version_sha1 = version_sha1
+        self.version_json_path = version_json_path
+        self.assets_root = assets_root
+
+    def run(self):
+        try:
+            version_path = download_verified_version_json(
+                self.version_metadata_url, self.version_sha1, self.version_json_path,
+                progress_callback=lambda done, total: self.progress.emit(done, total, "version JSON"),
+            )
+            with Path(version_path).open("r", encoding="utf-8") as stream:
+                version_metadata = json.load(stream)
+            asset_ref = version_metadata.get("assetIndex")
+            if not isinstance(asset_ref, dict):
+                raise ValueError("Selected Minecraft version has no asset index metadata.")
+            index_id = asset_ref.get("id")
+            if (not isinstance(index_id, str) or not index_id
+                    or any(not (char.isalnum() or char in "._-") for char in index_id)):
+                raise ValueError("Asset index ID is invalid.")
+            index_url = asset_ref.get("url")
+            index_sha1 = asset_ref.get("sha1")
+            index_path = self.assets_root / "indexes" / f"{index_id}.json"
+            self.progress.emit(0, 0, "asset index")
+            cached_index = download_verified_version_json(
+                index_url, index_sha1, index_path,
+                progress_callback=lambda done, total: self.progress.emit(done, total, "asset index"),
+            )
+            with Path(cached_index).open("r", encoding="utf-8") as stream:
+                asset_index = json.load(stream)
+            artifacts = resolve_asset_objects(asset_index)
+            objects_root = self.assets_root / "objects"
+            paths = download_verified_libraries(
+                artifacts, objects_root,
+                progress_callback=lambda done, total, path: self.progress.emit(done, total, path),
+            )
+            self.completed.emit({"index": str(cached_index), "count": len(paths)})
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -171,6 +218,7 @@ class MainWindow(QMainWindow):
         self.download_worker = None
         self.version_json_worker = None
         self.library_worker = None
+        self.asset_worker = None
         self.selected_metadata = None
         self.selected_metadata_version = None
         self.versions = []
@@ -347,12 +395,16 @@ class MainWindow(QMainWindow):
         self.library_button = QPushButton("Install libraries")
         self.library_button.setEnabled(False)
         self.library_button.clicked.connect(self.install_selected_libraries)
+        self.asset_button = QPushButton("Install assets")
+        self.asset_button.setEnabled(False)
+        self.asset_button.clicked.connect(self.install_selected_assets)
         bottom.addWidget(self.version_status, 1)
         bottom.addWidget(self.selected_version_label)
         bottom.addWidget(self.inspect_button)
         bottom.addWidget(self.download_button)
         bottom.addWidget(self.version_json_button)
         bottom.addWidget(self.library_button)
+        bottom.addWidget(self.asset_button)
         bottom.addWidget(choose)
         layout.addLayout(bottom)
         return page
@@ -439,6 +491,7 @@ class MainWindow(QMainWindow):
         self.download_button.setEnabled(True)
         self.version_json_button.setEnabled(True)
         self.library_button.setEnabled(True)
+        self.asset_button.setEnabled(True)
         self.version_status.setText(
             f"{version_id}: {java} • client JAR {size_mb:.1f} MiB • "
             f"{summary['libraries_count']} libraries • assets {summary['asset_index'] or 'n/a'}"
@@ -499,6 +552,58 @@ class MainWindow(QMainWindow):
         self.version_status.setText("Library installation failed; unverified files were not accepted.")
         self.log(f"Library installation error: {error}")
         self.library_worker = None
+
+    def install_selected_assets(self):
+        if self.asset_worker and self.asset_worker.isRunning():
+            return
+        if self.selected_metadata_version != self.selected_version:
+            QMessageBox.information(self, "VOIDEX", "Inspect the selected version first.")
+            return
+        entry = next((item for item in self.versions
+                      if item.get("id") == self.selected_version), None)
+        if not entry or not entry.get("url") or not entry.get("sha1"):
+            self.log("Selected version has no version JSON URL or SHA-1 in the manifest.")
+            return
+        version_id = self.selected_version
+        cache_root = Path.home() / ".voidex" / "cache" / "versions" / version_id
+        version_json_path = cache_root / f"{version_id}.json"
+        assets_root = Path.home() / ".voidex" / "assets"
+        self.asset_button.setEnabled(False)
+        self.version_status.setText(f"Preparing Minecraft assets for {version_id}...")
+        self.asset_worker = AssetInstallWorker(
+            entry["url"], entry["sha1"], version_json_path, assets_root, self
+        )
+        self.asset_worker.progress.connect(self._asset_install_progress)
+        self.asset_worker.completed.connect(self._asset_install_completed)
+        self.asset_worker.failed.connect(self._asset_install_failed)
+        self.asset_worker.finished.connect(lambda: self.asset_button.setEnabled(True))
+        self.asset_worker.start()
+        self.log(f"Resolving and downloading verified asset objects for {version_id}.")
+
+    def _asset_install_progress(self, completed, total, current_path):
+        stage = "Asset index" if current_path == "asset index" else (
+            "Version JSON" if current_path == "version JSON" else "Assets"
+        )
+        if total:
+            self.version_status.setText(
+                f"{stage}: {completed / (1024 * 1024):.1f} / "
+                f"{total / (1024 * 1024):.1f} MiB • {current_path}"
+            )
+        else:
+            self.version_status.setText(f"Preparing {current_path}...")
+
+    def _asset_install_completed(self, result):
+        count = result["count"]
+        self.version_status.setText(
+            f"Verified asset objects cached: {count}. Native extraction and game launch are still pending."
+        )
+        self.log(f"Asset stage complete: {count} verified objects cached under .voidex/assets/objects.")
+        self.asset_worker = None
+
+    def _asset_install_failed(self, error):
+        self.version_status.setText("Asset installation failed; unverified objects were not accepted.")
+        self.log(f"Asset installation error: {error}")
+        self.asset_worker = None
 
     def cache_selected_version_json(self):
         if self.version_json_worker and self.version_json_worker.isRunning():
@@ -587,6 +692,7 @@ class MainWindow(QMainWindow):
         self.download_button.setEnabled(False)
         self.version_json_button.setEnabled(False)
         self.library_button.setEnabled(False)
+        self.asset_button.setEnabled(False)
         self.version_status.setText("Could not inspect version metadata.")
         self.log(f"Version metadata error: {error}")
         self.metadata_worker = None
@@ -605,6 +711,7 @@ class MainWindow(QMainWindow):
             self.download_button.setEnabled(False)
             self.version_json_button.setEnabled(False)
             self.library_button.setEnabled(False)
+            self.asset_button.setEnabled(False)
         self.selected_version_label.setText(f"Selected: {self.selected_version}")
         self.home_version.setText(f"Selected version: {self.selected_version}")
         self.settings.setValue("selected_version", self.selected_version)
