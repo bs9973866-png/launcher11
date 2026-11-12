@@ -564,7 +564,7 @@ class JavaDiscoveryTests(unittest.TestCase):
             found = discover_java_candidates(
                 extra_paths=[extra_java],
                 environ={"JAVA_HOME": str(home_java.parent.parent), "PATH": ""},
-                path_value="",
+                path_value="", include_system=False,
             )
             self.assertEqual(found, [extra_java.resolve(), home_java.resolve()])
 
@@ -574,7 +574,7 @@ class JavaDiscoveryTests(unittest.TestCase):
             java.write_bytes(b"")
             found = discover_java_candidates(
                 extra_paths=[java, java, Path(directory) / "missing"],
-                environ={"PATH": ""}, path_value="",
+                environ={"PATH": ""}, path_value="", include_system=False,
             )
             self.assertEqual(found, [java.resolve()])
 
