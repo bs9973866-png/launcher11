@@ -338,7 +338,7 @@ class LibraryDownloadTests(unittest.TestCase):
             target.write_bytes(self.payload)
             opener = Mock()
             result = download_verified_library(self.artifact, directory, opener=opener)
-            self.assertTrue(result[0].samefile(target))
+            self.assertTrue(result.samefile(target))
             opener.open.assert_not_called()
 
     def test_hash_mismatch_preserves_old_file_and_cleans_temp(self):
