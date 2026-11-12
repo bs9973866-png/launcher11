@@ -15,7 +15,8 @@ A lightweight, customizable Minecraft Java launcher for Windows, built with Pyth
 - One-button **Install selected version** pipeline: verifies and caches version JSON and client JAR, resolves and downloads Windows x64 libraries, safely extracts native archives, downloads the asset index and every referenced asset object, verifies the complete asset cache, and creates a per-version game directory. All network and extraction work runs in a background thread with stage/progress reporting; existing verified cache files are reused.
 - Optional standalone download of the selected client JAR, with streamed progress, byte-count and SHA-1 verification, temporary-file cleanup and atomic replacement. A previously verified cached file is reused.
 - Local Minecraft-compatible offline UUID generation from a player nickname.
-- Java discovery from JAVA_HOME, PATH and common Windows JDK vendor folders. Inspecting a Minecraft version now automatically checks the configured or discovered Java runtime against that version's required major; incompatible detections are reported instead of silently selecting the wrong runtime. The detected executable path can be saved in settings.
+- Java discovery from JAVA_HOME, PATH and common Windows JDK vendor folders. Inspecting a Minecraft version automatically checks the configured or discovered runtime against its required Java major.
+- Explicit **Install required Java** action in Settings downloads the matching Windows x64 Eclipse Temurin JDK from the official Adoptium API, checks the published SHA-256 and byte size, safely extracts the ZIP with traversal/link/resource limits, runs `java.exe -version`, and saves the verified runtime path under `.voidex/runtimes`. It never downloads Java without the user's click.
 - A tested launch-plan builder that checks Java compatibility, required library/client files, builds a platform-specific classpath without native classifier JARs, applies Mojang OS/feature rules, expands modern or legacy game arguments, and returns a shell-free argv/cwd plan. Account credentials must be explicitly supplied; the planner does not fabricate online sessions.
 - Low-end, Balanced and High-end starting presets, editable RAM allocation, rendering profile and JVM arguments.
 - Settings and the selected version are persisted with Qt settings.
@@ -29,10 +30,9 @@ This is an active preview, not a finished launcher. The following are not connec
 - Ely.by and Microsoft authentication.
 - Online skin lookup, skin upload and 3D skin preview.
 - Modrinth / CurseForge downloads and mod-loader installation.
-- Streaming Minecraft stdout/stderr into the Console page, process exit/error reporting, and a non-blocking Stop Minecraft action.
 - Signed Windows installer and portable package.
 
-The Launch button now performs a background preflight and starts a real Java process only when required files pass integrity checks. It currently supports explicit offline nickname sessions only; Ely.by and Microsoft authentication are not fabricated or bypassed. Use **Install selected version** on the Versions page to prepare the client JAR, libraries, assets and natives in one background operation. Java still needs to be present and selected/validated separately in Settings before launch.
+The Launch button performs a background preflight and starts a real Java process only when required files pass integrity checks. It currently supports explicit offline nickname sessions only; Ely.by and Microsoft authentication are not fabricated or bypassed. Use **Install selected version** on the Versions page to prepare the client JAR, libraries, assets and natives in one background operation. If a compatible Java runtime is missing, inspect the version and use **Install required Java** in Settings; the matching Temurin runtime is then installed and validated locally.
 
 ## Requirements
 
