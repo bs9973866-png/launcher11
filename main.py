@@ -15,7 +15,7 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             discover_java_candidates, validate_java_executable,
                             build_launch_plan, verify_cached_asset_objects,
                             install_temurin_runtime, search_modrinth_mods,
-                            fetch_modrinth_compatible_version, download_verified_modrinth_file)
+                            fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -660,6 +660,8 @@ class MainWindow(QMainWindow):
         self.pages.setCurrentIndex(index)
         if index == 1 and not self.versions:
             self.refresh_versions()
+        if index == 2:
+            self.refresh_installed_mods()
 
     def _panel(self, title: str, subtitle: str = ""):
         panel = QFrame()
@@ -779,7 +781,27 @@ class MainWindow(QMainWindow):
         self.modrinth_install_button.clicked.connect(self.install_selected_modrinth)
         actions.addWidget(self.modrinth_status, 1)
         actions.addWidget(self.modrinth_install_button)
+        self.modrinth_refresh_installed_button = QPushButton("Refresh installed")
+        self.modrinth_refresh_installed_button.clicked.connect(self.refresh_installed_mods)
+        self.modrinth_remove_button = QPushButton("Remove selected")
+        self.modrinth_remove_button.setEnabled(False)
+        self.modrinth_remove_button.clicked.connect(self.remove_selected_installed_mod)
+        actions.addWidget(self.modrinth_refresh_installed_button)
+        actions.addWidget(self.modrinth_remove_button)
         layout.addLayout(actions)
+
+        installed_heading = QLabel("Installed mods in this instance")
+        installed_heading.setStyleSheet("font-size: 13pt; font-weight: 700;")
+        layout.addWidget(installed_heading)
+        self.installed_mods_table = QTableWidget(0, 2)
+        self.installed_mods_table.setHorizontalHeaderLabels(["File", "Size"])
+        self.installed_mods_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.installed_mods_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.installed_mods_table.horizontalHeader().setStretchLastSection(True)
+        self.installed_mods_table.itemSelectionChanged.connect(
+            lambda: self.modrinth_remove_button.setEnabled(self.installed_mods_table.currentRow() >= 0)
+        )
+        layout.addWidget(self.installed_mods_table, 1)
 
         warning = QLabel(
             "Note: this downloads mods only. The matching Fabric/Forge/NeoForge/Quilt loader "
@@ -789,6 +811,60 @@ class MainWindow(QMainWindow):
         warning.setWordWrap(True)
         layout.addWidget(warning)
         return page
+
+    def refresh_installed_mods(self):
+        version = self.modrinth_game_version.text().strip()
+        if not __import__("re").fullmatch(r"\\d+\\.\\d+(?:\\.\\d+)?", version):
+            self.modrinth_status.setText("Enter a valid Minecraft version to inspect its mods folder.")
+            return
+        directory = Path.home() / ".voidex" / "instances" / version / "mods"
+        try:
+            installed = list_installed_mods(directory)
+        except (OSError, ValueError) as exc:
+            self.modrinth_status.setText(f"Could not inspect installed mods: {exc}")
+            self.log(f"Installed-mod scan failed: {exc}")
+            return
+        self.installed_mods_table.setRowCount(len(installed))
+        for row, item in enumerate(installed):
+            name = QTableWidgetItem(item["name"])
+            name.setData(Qt.ItemDataRole.UserRole, item["name"])
+            self.installed_mods_table.setItem(row, 0, name)
+            size = item["size"]
+            label = f"{size / (1024 * 1024):.2f} MiB" if size >= 1024 * 1024 else f"{size / 1024:.1f} KiB"
+            self.installed_mods_table.setItem(row, 1, QTableWidgetItem(label))
+        self.installed_mods_table.resizeColumnsToContents()
+        self.modrinth_remove_button.setEnabled(False)
+        self.modrinth_status.setText(
+            f"{len(installed)} installed mod JAR(s) in Minecraft {version}."
+        )
+
+    def remove_selected_installed_mod(self):
+        row = self.installed_mods_table.currentRow()
+        if row < 0:
+            return
+        item = self.installed_mods_table.item(row, 0)
+        filename = item.data(Qt.ItemDataRole.UserRole) if item else None
+        version = self.modrinth_game_version.text().strip()
+        if not __import__("re").fullmatch(r"\\d+\\.\\d+(?:\\.\\d+)?", version):
+            self.modrinth_status.setText("Enter a valid Minecraft version first.")
+            return
+        answer = QMessageBox.question(
+            self, "Remove mod",
+            f"Remove {filename} from Minecraft {version}? This only deletes the selected JAR.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        directory = Path.home() / ".voidex" / "instances" / version / "mods"
+        try:
+            remove_installed_mod(directory, filename)
+        except (OSError, ValueError) as exc:
+            self.modrinth_status.setText(f"Could not remove mod: {exc}")
+            self.log(f"Mod removal failed: {exc}")
+            return
+        self.log(f"Removed installed mod {filename} from Minecraft {version}.")
+        self.refresh_installed_mods()
 
     def search_modrinth(self):
         if self.modrinth_search_worker and self.modrinth_search_worker.isRunning():
@@ -862,6 +938,7 @@ class MainWindow(QMainWindow):
     def _modrinth_install_completed(self, path, version_name):
         self.modrinth_status.setText(f"Installed and checksum-verified: {Path(path).name} ({version_name})")
         self.log(f"Modrinth mod installed and verified: {path}")
+        self.refresh_installed_mods()
 
     def _modrinth_install_failed(self, error):
         self.modrinth_status.setText(f"Mod install failed: {error}")
