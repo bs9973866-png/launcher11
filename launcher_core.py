@@ -708,7 +708,7 @@ def extract_native_archives(archives, destination,
 _JAVA_VERSION_RE = re.compile(r'version "([^"]+)"')
 
 
-def discover_java_candidates(extra_paths=None, environ=None, path_value=None):
+def discover_java_candidates(extra_paths=None, environ=None, path_value=None, include_system=True):
     """Find likely Java executables without recursively scanning the whole disk."""
     env = os.environ if environ is None else environ
     search_path = env.get("PATH", "") if path_value is None else path_value
@@ -738,7 +738,7 @@ def discover_java_candidates(extra_paths=None, environ=None, path_value=None):
         add(Path(java_home) / "bin" / executable_name)
     add(shutil.which("java", path=search_path))
 
-    if is_windows:
+    if include_system and is_windows:
         roots = [Path(env[key]) for key in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA") if env.get(key)]
         vendors = ("Java", "Eclipse Adoptium", "Microsoft", "Zulu", "Azul",
                    "Amazon Corretto", "BellSoft", "AdoptOpenJDK")
@@ -751,7 +751,7 @@ def discover_java_candidates(extra_paths=None, environ=None, path_value=None):
                             add(home / "bin" / "java.exe")
                     except OSError:
                         continue
-    else:
+    elif include_system:
         for root in (Path("/usr/lib/jvm"), Path("/usr/java")):
             if root.is_dir():
                 try:
