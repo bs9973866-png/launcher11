@@ -1811,7 +1811,7 @@ FORGE_MAVEN_HOST = "maven.minecraftforge.net"
 
 def _download_forge_installer(game_version, forge_version, destination, opener=None,
                               progress_callback=None):
-    if (not isinstance(game_version, str) or not re.fullmatch(r"\\d+\\.\\d+(?:\\.\\d+)?", game_version)
+    if (not isinstance(game_version, str) or not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", game_version)
             or not isinstance(forge_version, str) or not _FORGE_VERSION_RE.fullmatch(forge_version)):
         raise ValueError("Forge installer version is invalid.")
     root = Path(destination).expanduser()
