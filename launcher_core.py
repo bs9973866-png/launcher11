@@ -916,6 +916,17 @@ def build_minecraft_classpath(version_metadata, client_jar, libraries_root,
             raise ValueError("Library classpath path escapes the libraries directory.") from exc
         if candidate.is_symlink() or not candidate.is_file():
             raise ValueError(f"Required Minecraft library is missing: {artifact['path']}")
+        expected_size = artifact.get("size")
+        expected_sha1 = artifact.get("sha1")
+        if expected_size is not None and candidate.stat().st_size != expected_size:
+            raise ValueError(f"Minecraft library size mismatch: {artifact['path']}")
+        if expected_sha1:
+            digest = hashlib.sha1()
+            with candidate.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest().lower() != expected_sha1.lower():
+                raise ValueError(f"Minecraft library SHA-1 mismatch: {artifact['path']}")
         classpath_items.append(str(candidate))
 
     client_source = Path(client_jar).expanduser()
@@ -1051,3 +1062,41 @@ def build_launch_plan(version_metadata, *, java_executable, client_jar,
         "assets_root": str(assets_path),
         "assets_index_name": str(asset_index_name),
     }
+
+
+def verify_cached_asset_objects(asset_index_path, objects_root):
+    """Verify every content-addressed asset object referenced by an index."""
+    index_file = Path(asset_index_path).expanduser()
+    if index_file.is_symlink() or not index_file.is_file():
+        raise ValueError("Minecraft asset index is missing or unsafe.")
+    try:
+        with index_file.open("r", encoding="utf-8") as stream:
+            index = json.load(stream)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read Minecraft asset index: {exc}") from exc
+    artifacts = resolve_asset_objects(index)
+    root = Path(objects_root).expanduser().resolve()
+    for artifact in artifacts:
+        relative = Path(artifact["path"])
+        candidate_source = root / relative
+        current = candidate_source
+        while current != root:
+            if current.is_symlink():
+                raise ValueError("Asset cache refuses symbolic-link paths.")
+            current = current.parent
+        candidate = candidate_source.resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Asset object path escapes the asset cache.") from exc
+        if not candidate.is_file():
+            raise ValueError(f"Required Minecraft asset is missing: {artifact['path']}")
+        if candidate.stat().st_size != artifact["size"]:
+            raise ValueError(f"Minecraft asset size mismatch: {artifact['path']}")
+        digest = hashlib.sha1()
+        with candidate.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != artifact["sha1"]:
+            raise ValueError(f"Minecraft asset SHA-1 mismatch: {artifact['path']}")
+    return {"count": len(artifacts), "index": index}
