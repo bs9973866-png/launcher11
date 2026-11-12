@@ -909,6 +909,74 @@ class MainWindow(QMainWindow):
         outer.addWidget(content, 1)
         self.setCentralWidget(root)
 
+    def refresh_instance_profiles(self):
+        if not hasattr(self, "instance_selector"):
+            return
+        try:
+            profiles = list_instance_profiles(Path.home() / ".voidex" / "profiles")
+        except (OSError, ValueError) as exc:
+            self.instance_status.setText(f"Could not load instances: {exc}")
+            self.log(f"Instance profile scan failed: {exc}")
+            return
+        previous = str(self.selected_instance_id or "")
+        self.instance_selector.blockSignals(True)
+        self.instance_selector.clear()
+        self.instance_selector.addItem("Default (shared version folder)", "")
+        for profile in profiles:
+            label = f"{profile['name']}  ·  {profile['game_version']}  ·  {profile['loader'].title()}"
+            self.instance_selector.addItem(label, profile["id"])
+        index = self.instance_selector.findData(previous)
+        self.instance_selector.setCurrentIndex(index if index >= 0 else 0)
+        self.instance_selector.blockSignals(False)
+        self.selected_instance_id = str(self.instance_selector.currentData() or "")
+        self.settings.setValue("selected_instance_id", self.selected_instance_id)
+        if self.selected_instance_id:
+            current = next((p for p in profiles if p["id"] == self.selected_instance_id), None)
+            self.instance_status.setText(
+                f"Active: {current['name']} — separate game folder; shared verified libraries and assets."
+                if current else "Selected instance is unavailable."
+            )
+        else:
+            self.instance_status.setText("Default instance uses the shared version folder.")
+
+    def _instance_selection_changed(self, index):
+        if not hasattr(self, "instance_selector") or index < 0:
+            return
+        self.selected_instance_id = str(self.instance_selector.currentData() or "")
+        self.settings.setValue("selected_instance_id", self.selected_instance_id)
+        self.refresh_instance_profiles()
+        if self.selected_instance_id:
+            self.log(f"Selected named instance: {self.selected_instance_id}")
+        else:
+            self.log("Selected the default shared game directory.")
+
+    def create_instance(self):
+        version = str(self.selected_version)
+        if not __import__("re").fullmatch(r"\\d+\\.\\d+(?:\\.\\d+)?", version):
+            QMessageBox.information(
+                self, "VOIDEX", "Select a concrete Minecraft version first, then create an instance."
+            )
+            self._navigate(1)
+            return
+        name, accepted = QInputDialog.getText(self, "New VOIDEX instance", "Instance name:")
+        if not accepted:
+            return
+        try:
+            profile = create_instance_profile(
+                Path.home() / ".voidex" / "profiles", name, version, "vanilla"
+            )
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "VOIDEX", f"Could not create instance: {exc}")
+            self.log(f"Instance creation failed: {exc}")
+            return
+        self.selected_instance_id = profile["id"]
+        self.settings.setValue("selected_instance_id", self.selected_instance_id)
+        self.refresh_instance_profiles()
+        self.log(
+            f"Created instance '{profile['name']}' for Minecraft {version}. "
+            "Its game data is isolated from other instances."
+        )
+
     def _navigate(self, index):
         self.pages.setCurrentIndex(index)
         if index == 1 and not self.versions:
