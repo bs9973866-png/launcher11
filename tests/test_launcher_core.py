@@ -1321,6 +1321,19 @@ class ModrinthMrpackImportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "multiple incompatible loaders"):
                 install_modrinth_mrpack(bad_loader, root / "voidex")
 
+    def test_rejects_malformed_manifest_and_unsafe_override_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bad = self._archive(root, {**self._manifest(), "dependencies": []})
+            with self.assertRaisesRegex(ValueError, "dependencies are missing"):
+                install_modrinth_mrpack(bad, root / "voidex")
+            bad_path = root / "unsafe.mrpack"
+            with zipfile.ZipFile(bad_path, "w") as package:
+                package.writestr("modrinth.index.json", json.dumps(self._manifest()))
+                package.writestr("overrides/../escape.txt", b"escape")
+            with self.assertRaisesRegex(ValueError, "path is unsafe"):
+                install_modrinth_mrpack(bad_path, root / "voidex")
+
     def test_rejects_zip_symlink_override(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
