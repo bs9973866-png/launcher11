@@ -7,6 +7,8 @@ import urllib.request
 import uuid
 from datetime import datetime
 
+from launcher_core import fetch_version_metadata, summarize_version_metadata
+
 from PySide6.QtCore import Qt, QSettings, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
@@ -66,11 +68,28 @@ class ManifestWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class MetadataWorker(QThread):
+    loaded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, metadata_url, parent=None):
+        super().__init__(parent)
+        self.metadata_url = metadata_url
+
+    def run(self):
+        try:
+            metadata = fetch_version_metadata(self.metadata_url)
+            self.loaded.emit(summarize_version_metadata(metadata))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = QSettings("VOIDEX", "Launcher")
         self.manifest_worker = None
+        self.metadata_worker = None
         self.versions = []
         self.selected_version = self.settings.value("selected_version", "latest-release")
         self.setWindowTitle("VOIDEX Launcher")
@@ -234,8 +253,11 @@ class MainWindow(QMainWindow):
         self.selected_version_label.setObjectName("Muted")
         choose = QPushButton("Use selected version")
         choose.clicked.connect(self._choose_table_version)
+        self.inspect_button = QPushButton("Inspect selected")
+        self.inspect_button.clicked.connect(self.inspect_selected_version)
         bottom.addWidget(self.version_status, 1)
         bottom.addWidget(self.selected_version_label)
+        bottom.addWidget(self.inspect_button)
         bottom.addWidget(choose)
         layout.addLayout(bottom)
         return page
@@ -289,6 +311,46 @@ class MainWindow(QMainWindow):
             for col, value in enumerate(values):
                 self.version_table.setItem(row, col, QTableWidgetItem(value))
         self.version_table.resizeColumnsToContents()
+
+    def inspect_selected_version(self):
+        row = self.version_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "VOIDEX", "Select a version in the catalog first.")
+            return
+        version_id = self.version_table.item(row, 0).text()
+        entry = next((v for v in self.versions if v.get("id") == version_id), None)
+        if not entry or not entry.get("url"):
+            self.log(f"No metadata URL found for {version_id}.")
+            return
+        if self.metadata_worker and self.metadata_worker.isRunning():
+            return
+        self.inspect_button.setEnabled(False)
+        self.version_status.setText(f"Loading metadata for {version_id}...")
+        self.metadata_worker = MetadataWorker(entry["url"], self)
+        self.metadata_worker.loaded.connect(
+            lambda summary, version=version_id: self._metadata_loaded(version, summary)
+        )
+        self.metadata_worker.failed.connect(self._metadata_failed)
+        self.metadata_worker.finished.connect(lambda: self.inspect_button.setEnabled(True))
+        self.metadata_worker.start()
+        self.log(f"Inspecting Mojang metadata for {version_id}.")
+
+    def _metadata_loaded(self, version_id, summary):
+        java = f"Java {summary['java_major']}" if summary["java_major"] else "Java requirement not specified"
+        size_mb = summary["client_size"] / (1024 * 1024)
+        self.version_status.setText(
+            f"{version_id}: {java} • client JAR {size_mb:.1f} MiB • "
+            f"{summary['libraries_count']} libraries • assets {summary['asset_index'] or 'n/a'}"
+        )
+        self.log(
+            f"{version_id} metadata validated: {java}; SHA-1 {summary['client_sha1']}."
+        )
+        self.metadata_worker = None
+
+    def _metadata_failed(self, error):
+        self.version_status.setText("Could not inspect version metadata.")
+        self.log(f"Version metadata error: {error}")
+        self.metadata_worker = None
 
     def _choose_table_version(self, *_):
         row = self.version_table.currentRow()
