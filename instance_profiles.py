@@ -145,6 +145,39 @@ def list_instance_profiles(root) -> list[dict]:
     return sorted(profiles, key=lambda item: (item["name"].casefold(), item["id"]))
 
 
+
+def rename_instance_profile(root, profile_id, new_name) -> dict:
+    """Rename a profile without moving or modifying its isolated game directory."""
+    root_path = _safe_root(root)
+    profile_id = _validate_profile_id(profile_id)
+    new_name = _validate_profile_name(new_name)
+    directory = _profile_directory(root_path, profile_id)
+    metadata = directory / "profile.json"
+    if not directory.is_dir() or metadata.is_symlink() or not metadata.is_file():
+        raise ValueError("Instance profile does not exist or is unsafe.")
+    with metadata.open("r", encoding="utf-8") as stream:
+        data = json.load(stream)
+    if (not isinstance(data, dict) or data.get("schema") != _PROFILE_SCHEMA
+            or data.get("id") != profile_id):
+        raise ValueError("Instance profile metadata does not match its directory.")
+    for existing in list_instance_profiles(root_path):
+        if existing["id"] != profile_id and existing["name"].casefold() == new_name.casefold():
+            raise ValueError("An instance with this name already exists.")
+    data["name"] = new_name
+    temporary = directory / "profile.json.tmp"
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.write("\\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, metadata)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return {**data, "directory": str(directory),
+            "game_directory_path": str(directory / "game")}
+
 def delete_instance_profile(root, profile_id, *, delete_game_data=False) -> dict:
     """Remove profile metadata; game data is preserved unless explicitly requested."""
     root_path = _safe_root(root)
