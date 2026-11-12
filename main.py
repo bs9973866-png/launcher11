@@ -340,6 +340,11 @@ class LaunchCheckWorker(QThread):
             asset_ref = metadata.get("assetIndex") or {}
             if not isinstance(asset_ref, dict) or not asset_ref.get("id"):
                 raise ValueError("This version has no supported asset index.")
+            if asset_ref.get("virtual") or metadata.get("assets") == "legacy":
+                raise ValueError(
+                    "This older version requires virtual/legacy asset materialization, "
+                    "which is not implemented yet. Launch is blocked to avoid missing game resources."
+                )
             asset_index_path = home / "assets" / "indexes" / f"{asset_ref['id']}.json"
             objects_root = home / "assets" / "objects"
             if asset_ref.get("sha1"):
