@@ -355,3 +355,16 @@ def resolve_instance_mods_directory(root, profile_id, expected_game_version=None
     if mods_directory.is_symlink():
         raise ValueError("Instance mods directory is a symbolic link.")
     return mods_directory
+
+
+def resolve_instance_resource_directories(root, profile_id, expected_game_version=None) -> dict:
+    """Resolve isolated resource-pack and shader-pack folders for one instance."""
+    profile = resolve_instance_profile(root, profile_id, expected_game_version)
+    game_directory = Path(profile["game_directory_path"])
+    result = {}
+    for key, folder_name in (("resourcepacks", "resourcepacks"), ("shaderpacks", "shaderpacks")):
+        directory = game_directory / folder_name
+        if directory.is_symlink():
+            raise ValueError(f"Instance {folder_name} directory is a symbolic link.")
+        result[key] = directory
+    return result
