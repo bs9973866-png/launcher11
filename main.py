@@ -6,8 +6,9 @@ import sys
 import urllib.request
 import uuid
 from datetime import datetime
+from pathlib import Path
 
-from launcher_core import fetch_version_metadata, summarize_version_metadata
+from launcher_core import fetch_version_metadata, summarize_version_metadata, download_verified_client
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal
 from PySide6.QtWidgets import (
@@ -84,12 +85,36 @@ class MetadataWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class ClientDownloadWorker(QThread):
+    progress = Signal(int, int)
+    completed = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, summary, destination, parent=None):
+        super().__init__(parent)
+        self.summary = summary
+        self.destination = destination
+
+    def run(self):
+        try:
+            path = download_verified_client(
+                self.summary, self.destination,
+                progress_callback=lambda done, total: self.progress.emit(done, total),
+            )
+            self.completed.emit(str(path))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = QSettings("VOIDEX", "Launcher")
         self.manifest_worker = None
         self.metadata_worker = None
+        self.download_worker = None
+        self.selected_metadata = None
+        self.selected_metadata_version = None
         self.versions = []
         self.selected_version = self.settings.value("selected_version", "latest-release")
         self.setWindowTitle("VOIDEX Launcher")
@@ -255,9 +280,13 @@ class MainWindow(QMainWindow):
         choose.clicked.connect(self._choose_table_version)
         self.inspect_button = QPushButton("Inspect selected")
         self.inspect_button.clicked.connect(self.inspect_selected_version)
+        self.download_button = QPushButton("Download client JAR")
+        self.download_button.setEnabled(False)
+        self.download_button.clicked.connect(self.download_selected_client)
         bottom.addWidget(self.version_status, 1)
         bottom.addWidget(self.selected_version_label)
         bottom.addWidget(self.inspect_button)
+        bottom.addWidget(self.download_button)
         bottom.addWidget(choose)
         layout.addLayout(bottom)
         return page
@@ -338,6 +367,9 @@ class MainWindow(QMainWindow):
     def _metadata_loaded(self, version_id, summary):
         java = f"Java {summary['java_major']}" if summary["java_major"] else "Java requirement not specified"
         size_mb = summary["client_size"] / (1024 * 1024)
+        self.selected_metadata = summary
+        self.selected_metadata_version = version_id
+        self.download_button.setEnabled(True)
         self.version_status.setText(
             f"{version_id}: {java} • client JAR {size_mb:.1f} MiB • "
             f"{summary['libraries_count']} libraries • assets {summary['asset_index'] or 'n/a'}"
@@ -347,7 +379,44 @@ class MainWindow(QMainWindow):
         )
         self.metadata_worker = None
 
+    def download_selected_client(self):
+        if not self.selected_metadata or self.selected_metadata_version != self.selected_version:
+            QMessageBox.information(self, "VOIDEX", "Inspect the selected version metadata first.")
+            return
+        if self.download_worker and self.download_worker.isRunning():
+            return
+        version_id = self.selected_metadata_version
+        destination = Path.home() / ".voidex" / "cache" / "clients" / f"{version_id}.jar"
+        self.download_button.setEnabled(False)
+        self.version_status.setText(f"Downloading verified client JAR for {version_id}...")
+        self.download_worker = ClientDownloadWorker(self.selected_metadata, destination, self)
+        self.download_worker.progress.connect(self._client_download_progress)
+        self.download_worker.completed.connect(self._client_download_completed)
+        self.download_worker.failed.connect(self._client_download_failed)
+        self.download_worker.finished.connect(lambda: self.download_button.setEnabled(True))
+        self.download_worker.start()
+        self.log(f"Downloading Mojang client JAR for {version_id} into the local cache.")
+
+    def _client_download_progress(self, downloaded, total):
+        self.version_status.setText(
+            f"Client JAR download: {downloaded / (1024 * 1024):.1f} / "
+            f"{total / (1024 * 1024):.1f} MiB"
+        )
+
+    def _client_download_completed(self, path):
+        self.version_status.setText(f"Client JAR downloaded and SHA-1 verified: {path}")
+        self.log(f"Verified client JAR cached at: {path}")
+        self.download_worker = None
+
+    def _client_download_failed(self, error):
+        self.version_status.setText("Client JAR download failed; no unverified file was installed.")
+        self.log(f"Client JAR download error: {error}")
+        self.download_worker = None
+
     def _metadata_failed(self, error):
+        self.selected_metadata = None
+        self.selected_metadata_version = None
+        self.download_button.setEnabled(False)
         self.version_status.setText("Could not inspect version metadata.")
         self.log(f"Version metadata error: {error}")
         self.metadata_worker = None
@@ -360,6 +429,10 @@ class MainWindow(QMainWindow):
         if not item:
             return
         self.selected_version = item.text()
+        if self.selected_metadata_version != self.selected_version:
+            self.selected_metadata = None
+            self.selected_metadata_version = None
+            self.download_button.setEnabled(False)
         self.selected_version_label.setText(f"Selected: {self.selected_version}")
         self.home_version.setText(f"Selected version: {self.selected_version}")
         self.settings.setValue("selected_version", self.selected_version)
