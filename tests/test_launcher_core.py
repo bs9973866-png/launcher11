@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import os
 import stat
@@ -18,7 +19,7 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            _fetch_temurin_asset, install_temurin_runtime,
                            search_modrinth_mods, fetch_modrinth_compatible_version,
                            download_verified_modrinth_file, list_installed_mods,
-                           remove_installed_mod, fetch_fabric_loader_versions, fetch_forge_loader_versions,
+                           remove_installed_mod, fetch_fabric_loader_versions, fetch_forge_loader_versions, _download_forge_installer,
                            install_fabric_loader, merge_fabric_profile_metadata)
 
 
@@ -991,6 +992,46 @@ class ForgeLoaderCatalogTests(unittest.TestCase):
         opener = self.JsonOpener(json.dumps({"promos": []}).encode())
         with self.assertRaisesRegex(ValueError, "promotions map"):
             fetch_forge_loader_versions("1.20.1", opener=opener)
+
+
+
+
+class ForgeInstallerDownloadTests(unittest.TestCase):
+    def test_downloads_and_verifies_official_installer(self):
+        payload = b"forge-installer-test"
+        checksum = hashlib.sha1(payload).hexdigest().encode()
+        opener = Mock()
+        opener.open.side_effect = [
+            io.BytesIO(checksum),
+            io.BytesIO(payload),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = _download_forge_installer(
+                "1.20.1", "47.3.0", directory, opener=opener
+            )
+            self.assertEqual(path.name, "forge-1.20.1-47.3.0-installer.jar")
+            self.assertEqual(path.read_bytes(), payload)
+            self.assertTrue(path.exists())
+
+    def test_rejects_checksum_mismatch_without_leaving_partial_file(self):
+        payload = b"unverified-installer"
+        opener = Mock()
+        opener.open.side_effect = [
+            io.BytesIO(b"0" * 40),
+            io.BytesIO(payload),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "SHA-1 verification"):
+                _download_forge_installer("1.20.1", "47.3.0", directory, opener=opener)
+            self.assertEqual(list(Path(directory).glob("*.part")), [])
+
+    def test_rejects_invalid_versions_before_network(self):
+        opener = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "version is invalid"):
+                _download_forge_installer("../1.20", "47.3.0", directory, opener=opener)
+        opener.open.assert_not_called()
+
 
 
 class InstalledModManagementTests(unittest.TestCase):
