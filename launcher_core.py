@@ -1501,7 +1501,7 @@ def list_installed_mods(mods_directory):
 def remove_installed_mod(mods_directory, filename):
     """Remove one regular JAR by its exact filename; never follow symlinks or paths."""
     if (not isinstance(filename, str) or not filename or Path(filename).name != filename
-            or "/" in filename or "\\\\" in filename
+            or "/" in filename or "\\" in filename
             or not filename.lower().endswith(".jar")):
         raise ValueError("Choose a valid mod JAR filename.")
     root = Path(mods_directory).expanduser()
