@@ -1955,7 +1955,7 @@ def merge_quilt_profile_metadata(base_metadata, profile, libraries_root):
             raise ValueError("Minecraft profile contains an invalid library entry.")
         by_name[item["name"]] = dict(item)
     trusted_hosts = {
-        QUILT_MAVEN_HOST, "libraries.minecraft.net",
+        QUILT_MAVEN_HOST, "maven.fabricmc.net", "libraries.minecraft.net",
         "repo.maven.apache.org", "repo1.maven.org",
     }
     for raw in profile_libraries:
