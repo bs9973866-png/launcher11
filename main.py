@@ -17,7 +17,8 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             install_temurin_runtime, search_modrinth_mods,
                             fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod,
                             fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata,
-                            fetch_forge_loader_versions, install_forge_loader, merge_forge_profile_metadata,\n                            fetch_neoforge_loader_versions, install_neoforge_loader)
+                            fetch_forge_loader_versions, install_forge_loader, merge_forge_profile_metadata,
+                            fetch_neoforge_loader_versions, install_neoforge_loader)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
