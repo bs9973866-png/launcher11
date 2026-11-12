@@ -849,15 +849,16 @@ def _fetch_temurin_asset(expected_major, opener=None):
     if not isinstance(assets, list) or not assets:
         raise ValueError(f"Eclipse Temurin has no Windows x64 JDK for Java {expected_major}.")
     for release in assets:
-        binaries = release.get("binaries", []) if isinstance(release, dict) else []
-        for binary in binaries:
-            if not isinstance(binary, dict):
-                continue
-            package = binary.get("package")
-            version = binary.get("version") or {}
-            if (binary.get("os") != "windows" or binary.get("architecture") != "x64"
-                    or binary.get("image_type") != "jdk" or not isinstance(package, dict)):
-                continue
+        if not isinstance(release, dict):
+            continue
+        binary = release.get("binary")
+        if not isinstance(binary, dict):
+            continue
+        package = binary.get("package")
+        version = release.get("version") or {}
+        if (binary.get("os") != "windows" or binary.get("architecture") != "x64"
+                or binary.get("image_type") != "jdk" or not isinstance(package, dict)):
+            continue
             link = package.get("link")
             parsed_link = urlparse(link if isinstance(link, str) else "")
             checksum = package.get("checksum")
