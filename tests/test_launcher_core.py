@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import urllib.request
 
 from launcher_core import (download_verified_client, download_verified_library, download_verified_libraries, download_verified_version_json,
-                           resolve_library_artifacts, summarize_version_metadata)
+                           resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata)
 
 
 def sample_metadata():
@@ -431,6 +431,37 @@ class LibraryBatchDownloadTests(unittest.TestCase):
                 )
             opener.open.assert_not_called()
 
+
+class AssetResolutionTests(unittest.TestCase):
+    def test_resolves_asset_hashes_to_mojang_object_paths(self):
+        index = {"objects": {
+            "minecraft/sounds/test.ogg": {"hash": "a" * 40, "size": 17},
+            "minecraft/textures/test.png": {"hash": "b" * 40, "size": 29},
+        }}
+        assets = resolve_asset_objects(index)
+        self.assertEqual(len(assets), 2)
+        self.assertEqual(assets[0]["path"], "aa/" + "a" * 40)
+        self.assertEqual(assets[0]["url"], "https://resources.download.minecraft.net/aa/" + "a" * 40)
+        self.assertEqual(assets[0]["sha1"], "a" * 40)
+        self.assertEqual(assets[0]["size"], 17)
+
+    def test_deduplicates_identical_content_hashes(self):
+        index = {"objects": {
+            "one": {"hash": "c" * 40, "size": 5},
+            "two": {"hash": "c" * 40, "size": 5},
+        }}
+        self.assertEqual(len(resolve_asset_objects(index)), 1)
+
+    def test_rejects_invalid_asset_hash_and_size(self):
+        for metadata in ({"hash": "bad", "size": 5},
+                         {"hash": "d" * 40, "size": True},
+                         {"hash": "d" * 40, "size": 0}):
+            with self.subTest(metadata=metadata), self.assertRaises(ValueError):
+                resolve_asset_objects({"objects": {"asset": metadata}})
+
+    def test_rejects_missing_objects_map(self):
+        with self.assertRaisesRegex(ValueError, "objects map"):
+            resolve_asset_objects({})
 
 if __name__ == "__main__":
     unittest.main()
