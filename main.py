@@ -143,12 +143,23 @@ class ModpackImportWorker(QThread):
                 try:
                     if loader_key is None:
                         raise ValueError("Modpack uses an unsupported loader identifier.")
-                    update_instance_profile_loader(
-                        Path(self.voidex_root) / "profiles",
-                        self.instance_profile_id,
-                        result["game_version"],
-                        loader_key,
-                    )
+                    if loader_key == "vanilla":
+                        update_instance_profile_loader(
+                            Path(self.voidex_root) / "profiles",
+                            self.instance_profile_id,
+                            result["game_version"],
+                            loader_key,
+                        )
+                    else:
+                        if not result.get("profile_id"):
+                            raise ValueError("Imported modpack did not return a validated loader profile ID.")
+                        set_instance_profile_loader_profile(
+                            Path(self.voidex_root) / "profiles",
+                            self.instance_profile_id,
+                            result["game_version"],
+                            loader_key,
+                            result["profile_id"],
+                        )
                     result["instance_profile_loader_updated"] = True
                 except (OSError, ValueError) as exc:
                     result["profile_metadata_warning"] = str(exc)
