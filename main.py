@@ -1130,9 +1130,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Remove instance",
-            f"Remove '{selected['name']}' from the VOIDEX instance list?
-
-"
+            f"Remove '{selected['name']}' from the VOIDEX instance list?\n\n"
             "Its game files, worlds, mods and settings will be kept on disk. "
             "Only the profile entry is removed, so this instance will no longer appear in the launcher.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
