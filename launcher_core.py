@@ -40,7 +40,7 @@ def summarize_version_metadata(metadata: dict) -> dict:
         raise ValueError("This version metadata has no client JAR download.")
     url = client.get("url")
     parsed = urlparse(url if isinstance(url, str) else "")
-    if parsed.scheme != "https" or parsed.hostname != "piston-data.mojang.com":
+    if parsed.scheme != "https" or parsed.hostname not in {"piston-data.mojang.com", "launcher.mojang.com"}:
         raise ValueError("Client JAR URL is not on Mojang's HTTPS download host.")
     sha1 = client.get("sha1")
     if not isinstance(sha1, str) or not _SHA1_RE.fullmatch(sha1):
