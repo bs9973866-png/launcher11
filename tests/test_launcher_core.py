@@ -122,6 +122,14 @@ class ClientDownloadTests(unittest.TestCase):
                 download_verified_client(bad, Path(directory) / "client.jar", opener=opener)
             opener.open.assert_not_called()
 
+    def test_rejects_oversized_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bad = dict(self.summary, client_size=len(self.payload) - 1)
+            opener = Mock()
+            opener.open.return_value = FakeResponse(self.payload)
+            with self.assertRaisesRegex(ValueError, "larger"):
+                download_verified_client(bad, Path(directory) / "client.jar", opener=opener)
+
     def test_rejects_truncated_download(self):
         with tempfile.TemporaryDirectory() as directory:
             bad = dict(self.summary, client_size=len(self.payload) + 5)
