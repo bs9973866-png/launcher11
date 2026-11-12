@@ -4,7 +4,7 @@ A lightweight, customizable Minecraft Java launcher for Windows, built with Pyth
 
 ## Current preview features
 
-- Dark cosmic UI with Overview, Versions, Mods, Accounts, Settings and Console pages.
+- Dark cosmic UI with Overview, Versions, a working Modrinth mod browser, Accounts, Settings and Console pages.
 - On-demand connection to Mojang's official version manifest. The catalog supports searching and filtering releases, snapshots, old beta and old alpha entries.
 - On-demand inspection of a selected version's official Mojang metadata, including Java major-version requirement, client JAR size/checksum, asset index and library count. Metadata URLs and client download hosts are restricted to Mojang HTTPS hosts.
 - Optional download and caching of the selected version JSON, verified against the SHA-1 recorded in the official version manifest. The JSON is parsed before atomic replacement and cached under the version-specific VOIDEX directory.
@@ -17,6 +17,7 @@ A lightweight, customizable Minecraft Java launcher for Windows, built with Pyth
 - Local Minecraft-compatible offline UUID generation from a player nickname.
 - Java discovery from JAVA_HOME, PATH and common Windows JDK vendor folders. Inspecting a Minecraft version automatically checks the configured or discovered runtime against its required Java major.
 - Explicit **Install required Java** action in Settings downloads the matching Windows x64 Eclipse Temurin JDK from the official Adoptium API, checks the published SHA-256 and byte size, safely extracts the ZIP with traversal/link/resource limits, runs `java.exe -version`, and saves the verified runtime path under `.voidex/runtimes`. It never downloads Java without the user's click.
+- Modrinth browser: search real mod projects for a concrete Minecraft version and Fabric / Forge / NeoForge / Quilt filter, fetch a compatible project version, and install its primary JAR into `.voidex/instances/<version>/mods`. Downloads are restricted to the official Modrinth CDN and verified against published SHA-1 or SHA-512, size-checked, written to a temporary file, and atomically installed. Search and installation run in background workers.
 - A tested launch-plan builder that checks Java compatibility, required library/client files, builds a platform-specific classpath without native classifier JARs, applies Mojang OS/feature rules, expands modern or legacy game arguments, and returns a shell-free argv/cwd plan. Account credentials must be explicitly supplied; the planner does not fabricate online sessions.
 - Low-end, Balanced and High-end starting presets, editable RAM allocation, rendering profile and JVM arguments.
 - Settings and the selected version are persisted with Qt settings.
@@ -29,10 +30,10 @@ This is an active preview, not a finished launcher. The following are not connec
 - Full virtual/legacy asset materialization for older releases and authenticated Ely.by/Microsoft sessions. One-button installation currently supports modern indexed assets and Windows x64 library resolution. The current launch preflight verifies the selected version JSON, client JAR, library hashes, asset index and all asset objects, native directory, and Java major before starting a Java process. Offline profiles can launch with a local nickname; online account providers remain blocked until their authentication flows are implemented.
 - Ely.by and Microsoft authentication.
 - Online skin lookup, skin upload and 3D skin preview.
-- Modrinth / CurseForge downloads and mod-loader installation.
+- CurseForge integration, automatic Fabric / Forge / NeoForge / Quilt loader installation, and full modpack import/management. Modrinth mod JAR browsing and verified installation are available, but the matching loader must currently be installed separately for those mods to load.
 - Signed Windows installer and portable package.
 
-The Launch button performs a background preflight and starts a real Java process only when required files pass integrity checks. It currently supports explicit offline nickname sessions only; Ely.by and Microsoft authentication are not fabricated or bypassed. Use **Install selected version** on the Versions page to prepare the client JAR, libraries, assets and natives in one background operation. If a compatible Java runtime is missing, inspect the version and use **Install required Java** in Settings; the matching Temurin runtime is then installed and validated locally.
+The Launch button performs a background preflight and starts a real Java process only when required files pass integrity checks. It currently supports explicit offline nickname sessions only; Ely.by and Microsoft authentication are not fabricated or bypassed. Use **Install selected version** on the Versions page to prepare the client JAR, libraries, assets and natives in one background operation. If a compatible Java runtime is missing, inspect the version and use **Install required Java** in Settings; the matching Temurin runtime is then installed and validated locally. In the Mods page, select a concrete Minecraft version and loader to search and install compatible Modrinth JARs. The loader itself is not yet installed by VOIDEX, so mods will not load in a vanilla instance.
 
 ## Requirements
 
