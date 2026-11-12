@@ -345,3 +345,13 @@ def resolve_instance_profile(root, profile_id, expected_game_version=None):
         "loader_profile_id": data.get("loader_profile_id"),
         "game_directory_path": str(resolved),
     }
+
+
+def resolve_instance_mods_directory(root, profile_id, expected_game_version=None) -> Path:
+    """Resolve the mods folder belonging to one validated named instance."""
+    profile = resolve_instance_profile(root, profile_id, expected_game_version)
+    game_directory = Path(profile["game_directory_path"])
+    mods_directory = game_directory / "mods"
+    if mods_directory.is_symlink():
+        raise ValueError("Instance mods directory is a symbolic link.")
+    return mods_directory
