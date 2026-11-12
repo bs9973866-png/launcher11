@@ -1,4 +1,7 @@
 import hashlib
+import io
+import stat
+import zipfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +9,7 @@ from unittest.mock import Mock
 import urllib.request
 
 from launcher_core import (download_verified_client, download_verified_library, download_verified_libraries, download_verified_version_json,
-                           resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata)
+                           resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata,\n                           extract_native_archives)
 
 
 def sample_metadata():
@@ -465,3 +468,80 @@ class AssetResolutionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class NativeArchiveExtractionTests(unittest.TestCase):
+    def make_archive(self, directory, entries, name="native.jar"):
+        path = Path(directory) / name
+        with zipfile.ZipFile(path, "w") as archive:
+            for entry_name, payload in entries:
+                if isinstance(payload, zipfile.ZipInfo):
+                    archive.writestr(payload, b"link-target")
+                else:
+                    archive.writestr(entry_name, payload)
+        return path
+
+    def test_extracts_safe_nested_files_and_skips_meta_inf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = self.make_archive(directory, [
+                ("org/example/native.dll", b"native-bytes"),
+                ("META-INF/MANIFEST.MF", b"manifest"),
+            ])
+            output = Path(directory) / "natives"
+            extracted = extract_native_archives([archive], output)
+            self.assertEqual(len(extracted), 1)
+            self.assertEqual((output / "org/example/native.dll").read_bytes(), b"native-bytes")
+            self.assertFalse((output / "META-INF").exists())
+
+    def test_rejects_parent_traversal_before_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = self.make_archive(directory, [("../escape.dll", b"bad")])
+            output = Path(directory) / "natives"
+            with self.assertRaisesRegex(ValueError, "unsafe"):
+                extract_native_archives([archive], output)
+            self.assertFalse((Path(directory) / "escape.dll").exists())
+
+    def test_rejects_absolute_drive_and_backslash_paths(self):
+        for member in ("/rooted.dll", "C:/Windows/evil.dll", "folder\\evil.dll"):
+            with self.subTest(member=member), tempfile.TemporaryDirectory() as directory:
+                archive = self.make_archive(directory, [(member, b"bad")])
+                with self.assertRaises(ValueError):
+                    extract_native_archives([archive], Path(directory) / "out")
+
+    def test_rejects_symlink_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            link = zipfile.ZipInfo("native-link")
+            link.create_system = 3
+            link.external_attr = (stat.S_IFLNK | 0o777) << 16
+            archive = self.make_archive(directory, [("native-link", link)])
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                extract_native_archives([archive], Path(directory) / "out")
+
+    def test_enforces_entry_and_uncompressed_size_limits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = self.make_archive(directory, [
+                ("one.dll", b"1234"), ("two.dll", b"5678")
+            ])
+            with self.assertRaisesRegex(ValueError, "entry-count"):
+                extract_native_archives([archive], Path(directory) / "count", max_entries=1)
+            with self.assertRaisesRegex(ValueError, "total extraction"):
+                extract_native_archives([archive], Path(directory) / "size", max_total_size=7)
+            with self.assertRaisesRegex(ValueError, "file above"):
+                extract_native_archives([archive], Path(directory) / "file", max_file_size=3)
+
+    def test_rejects_duplicate_output_paths_across_archives(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = self.make_archive(directory, [("same.dll", b"first")], "first.jar")
+            second = self.make_archive(directory, [("same.dll", b"second")], "second.jar")
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                extract_native_archives([first, second], Path(directory) / "out")
+
+    def test_cleans_temporary_file_after_failed_entry_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = self.make_archive(directory, [("native.dll", b"payload")])
+            output = Path(directory) / "out"
+            # A deliberately restrictive limit trips during the streaming write.
+            with self.assertRaisesRegex(ValueError, "expanded"):
+                extract_native_archives([archive], output, max_file_size=3)
+            self.assertEqual(list(output.rglob("*.part")), [])
