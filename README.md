@@ -7,6 +7,7 @@ A lightweight, customizable Minecraft Java launcher for Windows, built with Pyth
 - Dark cosmic UI with Overview, Versions, Mods, Accounts, Settings and Console pages.
 - On-demand connection to Mojang's official version manifest. The catalog supports searching and filtering releases, snapshots, old beta and old alpha entries.
 - On-demand inspection of a selected version's official Mojang metadata, including Java major-version requirement, client JAR size/checksum, asset index and library count. Metadata URLs and client download hosts are restricted to Mojang HTTPS hosts.
+- Optional download of the selected client JAR into a local VOIDEX cache, with streamed progress, byte-count and SHA-1 verification, temporary-file cleanup and atomic replacement. A previously verified cached file is reused.
 - Local Minecraft-compatible offline UUID generation from a player nickname.
 - Low-end, Balanced and High-end starting presets, editable RAM allocation, rendering profile and JVM arguments.
 - Settings and the selected version are persisted with Qt settings.
@@ -16,14 +17,14 @@ A lightweight, customizable Minecraft Java launcher for Windows, built with Pyth
 
 This is an active preview, not a finished launcher. The following are not connected yet:
 
-- Actual Minecraft installation: downloading libraries/assets/client JAR, checksum verification on disk, Java executable discovery/validation and game process launch. The current metadata inspector validates the official metadata only; it does not download or launch the game.
+- Full Minecraft installation: downloading version JSON, libraries and assets, Java executable discovery/validation and game process launch. The current downloader caches only the verified client JAR; it does not create an installed Minecraft version or launch the game.
 - Ely.by and Microsoft authentication.
 - Online skin lookup, skin upload and 3D skin preview.
 - Modrinth / CurseForge downloads and mod-loader installation.
 - Streaming Minecraft process output into the console.
 - Signed Windows installer and portable package.
 
-The Launch button intentionally reports that launching is not ready instead of pretending a game was started. The version metadata inspector is a preparatory step, not an installer. Ely.by and Microsoft UUIDs are not fabricated.
+The Launch button intentionally reports that launching is not ready instead of pretending a game was started. The metadata inspector and client-JAR cache are preparatory steps, not a complete installer. Ely.by and Microsoft UUIDs are not fabricated.
 
 ## Requirements
 
