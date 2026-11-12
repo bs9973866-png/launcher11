@@ -169,3 +169,40 @@ def delete_instance_profile(root, profile_id, *, delete_game_data=False) -> dict
         pass
     return {"id": profile_id, "deleted": True, "game_data_deleted": False,
             "preserved_directory": str(directory) if directory.exists() else None}
+
+
+def resolve_instance_profile(root, profile_id, expected_game_version=None):
+    """Resolve a selected profile to its isolated game directory safely."""
+    root_path = _safe_root(root)
+    profile_id = _validate_profile_id(profile_id)
+    directory = _profile_directory(root_path, profile_id)
+    metadata = directory / "profile.json"
+    if metadata.is_symlink() or not metadata.is_file():
+        raise ValueError("Instance profile does not exist or is unsafe.")
+    with metadata.open("r", encoding="utf-8") as stream:
+        data = json.load(stream)
+    if (not isinstance(data, dict) or data.get("schema") != _PROFILE_SCHEMA
+            or data.get("id") != profile_id):
+        raise ValueError("Instance profile metadata is invalid.")
+    version = _validate_version(data.get("game_version"))
+    if expected_game_version is not None and version != expected_game_version:
+        raise ValueError(
+            f"Instance uses Minecraft {version}, not selected version {expected_game_version}."
+        )
+    if data.get("loader") not in _ALLOWED_LOADERS or data.get("game_directory") != "game":
+        raise ValueError("Instance profile settings are invalid.")
+    game_directory = directory / "game"
+    if game_directory.is_symlink() or not game_directory.is_dir():
+        raise ValueError("Instance game directory is missing or unsafe.")
+    resolved = game_directory.resolve()
+    try:
+        resolved.relative_to(directory.resolve())
+    except ValueError as exc:
+        raise ValueError("Instance game directory escapes its profile.") from exc
+    return {
+        "id": profile_id,
+        "name": _validate_profile_name(data.get("name")),
+        "game_version": version,
+        "loader": data["loader"],
+        "game_directory_path": str(resolved),
+    }
