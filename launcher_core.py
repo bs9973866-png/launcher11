@@ -1492,7 +1492,7 @@ def _fabric_json(path, opener=None):
     request = urllib.request.Request(
         parsed.geturl(), headers={"User-Agent": "VOIDEX-Launcher/0.7"}
     )
-    opener = opener or urllib.request.build_opener()
+    opener = opener or urllib.request.build_opener(SameHostLibraryRedirectHandler(FABRIC_META_HOST))
     with opener.open(request, timeout=25) as response:
         raw = response.read(8 * 1024 * 1024 + 1)
     if len(raw) > 8 * 1024 * 1024:
@@ -1535,7 +1535,7 @@ def _download_fabric_installer(version, destination, opener=None, progress_callb
     root = root.resolve()
     filename = f"fabric-installer-{version}.jar"
     url = f"https://{FABRIC_MAVEN_HOST}/net/fabricmc/fabric-installer/{version}/{filename}"
-    opener = opener or urllib.request.build_opener()
+    opener = opener or urllib.request.build_opener(SameHostLibraryRedirectHandler(FABRIC_MAVEN_HOST))
     checksum_request = urllib.request.Request(url + ".sha1", headers={"User-Agent": "VOIDEX-Launcher/0.7"})
     with opener.open(checksum_request, timeout=25) as response:
         checksum_text = response.read(256).decode("ascii", errors="strict").strip().split()[0]
@@ -1646,9 +1646,10 @@ def install_fabric_loader(game_version, loader_version, java_executable, voidex_
     versions_root = root / "versions"
     if versions_root.is_symlink() or not versions_root.is_dir():
         raise ValueError("Fabric installer did not create a versions directory.")
+    expected_profile_id = f"fabric-loader-{loader_version}-{game_version}"
     candidates = []
     for folder in versions_root.iterdir():
-        if folder.is_symlink() or not folder.is_dir() or not folder.name.startswith("fabric-loader-"):
+        if folder.is_symlink() or not folder.is_dir() or folder.name != expected_profile_id:
             continue
         profile_path = folder / (folder.name + ".json")
         if profile_path.is_symlink() or not profile_path.is_file():
