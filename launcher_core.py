@@ -971,6 +971,8 @@ def install_temurin_runtime(expected_major, runtimes_root, progress_callback=Non
     runtime_root.mkdir(parents=True, exist_ok=True)
     target_home = runtime_root / f"temurin-{expected_major}-windows-x64"
     target_java = target_home / "bin" / "java.exe"
+    if target_home.is_symlink():
+        raise ValueError("Refusing to use a symbolic-link Java runtime directory.")
     if target_java.is_file() and not target_java.is_symlink():
         try:
             return validate_java_executable(target_java, expected_major)["path"]
