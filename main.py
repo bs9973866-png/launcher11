@@ -10,7 +10,7 @@ from pathlib import Path
 
 from launcher_core import (fetch_version_metadata, summarize_version_metadata, download_verified_client,
                             download_verified_version_json, resolve_library_artifacts,
-                            download_verified_libraries, resolve_asset_objects)
+                            download_verified_libraries, resolve_asset_objects, extract_native_archives)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal
 from PySide6.QtWidgets import (
@@ -162,6 +162,48 @@ class LibraryInstallWorker(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+
+class NativeInstallWorker(QThread):
+    progress = Signal(int, int, str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, metadata_url, expected_sha1, version_json_path,
+                 libraries_root, natives_root, parent=None):
+        super().__init__(parent)
+        self.metadata_url = metadata_url
+        self.expected_sha1 = expected_sha1
+        self.version_json_path = version_json_path
+        self.libraries_root = libraries_root
+        self.natives_root = natives_root
+
+    def run(self):
+        try:
+            json_path = download_verified_version_json(
+                self.metadata_url, self.expected_sha1, self.version_json_path,
+                progress_callback=lambda done, total: self.progress.emit(done, total, "version JSON"),
+            )
+            with Path(json_path).open("r", encoding="utf-8") as stream:
+                metadata = json.load(stream)
+            artifacts = resolve_library_artifacts(metadata, os_name="windows", arch="x86_64")
+            native_artifacts = [item for item in artifacts if item.get("source") == "native"]
+            if not native_artifacts:
+                self.completed.emit({"archives": 0, "files": 0, "directory": str(self.natives_root)})
+                return
+            archives = download_verified_libraries(
+                native_artifacts, self.libraries_root,
+                progress_callback=lambda done, total, path: self.progress.emit(done, total, path),
+            )
+            extracted = extract_native_archives(archives, self.natives_root)
+            self.completed.emit({
+                "archives": len(archives),
+                "files": len(extracted),
+                "directory": str(self.natives_root),
+            })
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class AssetInstallWorker(QThread):
     progress = Signal(int, int, str)
     completed = Signal(object)
@@ -219,6 +261,7 @@ class MainWindow(QMainWindow):
         self.version_json_worker = None
         self.library_worker = None
         self.asset_worker = None
+        self.native_worker = None
         self.selected_metadata = None
         self.selected_metadata_version = None
         self.versions = []
@@ -398,6 +441,9 @@ class MainWindow(QMainWindow):
         self.asset_button = QPushButton("Install assets")
         self.asset_button.setEnabled(False)
         self.asset_button.clicked.connect(self.install_selected_assets)
+        self.native_button = QPushButton("Prepare natives")
+        self.native_button.setEnabled(False)
+        self.native_button.clicked.connect(self.prepare_selected_natives)
         bottom.addWidget(self.version_status, 1)
         bottom.addWidget(self.selected_version_label)
         bottom.addWidget(self.inspect_button)
@@ -405,6 +451,7 @@ class MainWindow(QMainWindow):
         bottom.addWidget(self.version_json_button)
         bottom.addWidget(self.library_button)
         bottom.addWidget(self.asset_button)
+        bottom.addWidget(self.native_button)
         bottom.addWidget(choose)
         layout.addLayout(bottom)
         return page
@@ -492,6 +539,7 @@ class MainWindow(QMainWindow):
         self.version_json_button.setEnabled(True)
         self.library_button.setEnabled(True)
         self.asset_button.setEnabled(bool(summary["asset_index"]))
+        self.native_button.setEnabled(True)
         self.version_status.setText(
             f"{version_id}: {java} • client JAR {size_mb:.1f} MiB • "
             f"{summary['libraries_count']} libraries • assets {summary['asset_index'] or 'n/a'}"
@@ -552,6 +600,58 @@ class MainWindow(QMainWindow):
         self.version_status.setText("Library installation failed; unverified files were not accepted.")
         self.log(f"Library installation error: {error}")
         self.library_worker = None
+
+
+    def prepare_selected_natives(self):
+        if self.native_worker and self.native_worker.isRunning():
+            return
+        if self.selected_metadata_version != self.selected_version:
+            QMessageBox.information(self, "VOIDEX", "Inspect the selected version first.")
+            return
+        entry = next((item for item in self.versions
+                      if item.get("id") == self.selected_version), None)
+        if not entry or not entry.get("url") or not entry.get("sha1"):
+            self.log("Selected version has no version JSON URL or SHA-1.")
+            return
+        version_id = self.selected_version
+        cache_root = Path.home() / ".voidex" / "cache" / "versions" / version_id
+        version_json_path = cache_root / f"{version_id}.json"
+        libraries_root = Path.home() / ".voidex" / "libraries"
+        natives_root = Path.home() / ".voidex" / "versions" / version_id / "natives"
+        self.native_button.setEnabled(False)
+        self.version_status.setText(f"Preparing native libraries for {version_id}...")
+        self.native_worker = NativeInstallWorker(
+            entry["url"], entry["sha1"], version_json_path,
+            libraries_root, natives_root, self
+        )
+        self.native_worker.progress.connect(self._native_install_progress)
+        self.native_worker.completed.connect(self._native_install_completed)
+        self.native_worker.failed.connect(self._native_install_failed)
+        self.native_worker.finished.connect(lambda: self.native_button.setEnabled(True))
+        self.native_worker.start()
+        self.log(f"Downloading verified native classifiers and safely extracting them for {version_id}.")
+
+    def _native_install_progress(self, completed, total, current_path):
+        if total:
+            self.version_status.setText(
+                f"Native download: {completed / (1024 * 1024):.1f} / "
+                f"{total / (1024 * 1024):.1f} MiB • {current_path}"
+            )
+        else:
+            self.version_status.setText("Preparing version metadata for native libraries...")
+
+    def _native_install_completed(self, result):
+        self.version_status.setText(
+            f"Native preparation complete: {result['archives']} archives, "
+            f"{result['files']} files extracted."
+        )
+        self.log(f"Native files prepared in {result['directory']}.")
+        self.native_worker = None
+
+    def _native_install_failed(self, error):
+        self.version_status.setText("Native preparation failed; unsafe archive entries were rejected.")
+        self.log(f"Native extraction error: {error}")
+        self.native_worker = None
 
     def install_selected_assets(self):
         if self.asset_worker and self.asset_worker.isRunning():
@@ -693,6 +793,7 @@ class MainWindow(QMainWindow):
         self.version_json_button.setEnabled(False)
         self.library_button.setEnabled(False)
         self.asset_button.setEnabled(False)
+        self.native_button.setEnabled(False)
         self.version_status.setText("Could not inspect version metadata.")
         self.log(f"Version metadata error: {error}")
         self.metadata_worker = None
@@ -712,6 +813,7 @@ class MainWindow(QMainWindow):
             self.version_json_button.setEnabled(False)
             self.library_button.setEnabled(False)
             self.asset_button.setEnabled(False)
+            self.native_button.setEnabled(False)
         self.selected_version_label.setText(f"Selected: {self.selected_version}")
         self.home_version.setText(f"Selected version: {self.selected_version}")
         self.settings.setValue("selected_version", self.selected_version)
