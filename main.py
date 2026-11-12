@@ -965,16 +965,51 @@ class MainWindow(QMainWindow):
         self.settings.setValue("selected_instance_id", self.selected_instance_id)
         if self.selected_instance_id:
             current = next((p for p in profiles if p["id"] == self.selected_instance_id), None)
-            self.instance_status.setText(
-                f"Active: {current['name']} — separate game folder; shared verified libraries and assets."
-                if current else "Selected instance is unavailable."
-            )
+            if current:
+                self._apply_instance_version(current)
+                self.instance_status.setText(
+                    f"Active: {current['name']} — Minecraft {current['game_version']} / "
+                    f"{current['loader'].title()} — isolated game folder; shared verified libraries and assets."
+                )
+            else:
+                self.instance_status.setText("Selected instance is unavailable.")
         else:
             self.instance_status.setText("Default instance uses the shared version folder.")
         busy = self._instance_management_busy()
         if hasattr(self, "rename_instance_button"):
             self.rename_instance_button.setEnabled(bool(self.selected_instance_id) and not busy)
             self.remove_instance_button.setEnabled(bool(self.selected_instance_id) and not busy)
+
+    def _apply_instance_version(self, profile):
+        """Keep the version picker and launch target pinned to the active instance."""
+        version = str(profile["game_version"])
+        changed = str(self.selected_version) != version
+        self.selected_version = version
+        self.settings.setValue("selected_version", version)
+        if hasattr(self, "home_version"):
+            self.home_version.setText(f"Selected version: {version}")
+        if hasattr(self, "selected_version_label"):
+            self.selected_version_label.setText(f"Selected: {version} · pinned to instance")
+        if changed:
+            self.selected_metadata = None
+            self.selected_metadata_version = None
+            for button_name in (
+                "download_button", "version_json_button", "library_button",
+                "asset_button", "native_button", "full_install_button",
+            ):
+                button = getattr(self, button_name, None)
+                if button is not None:
+                    button.setEnabled(False)
+            if hasattr(self, "version_status"):
+                self.version_status.setText(
+                    f"Instance uses Minecraft {version}. Inspect this version before installing."
+                )
+        if hasattr(self, "version_table"):
+            for row in range(self.version_table.rowCount()):
+                item = self.version_table.item(row, 0)
+                if item and item.text() == version:
+                    self.version_table.selectRow(row)
+                    break
 
     def _instance_management_busy(self):
         for attribute in ("launch_worker", "modpack_import_worker", "modrinth_install_worker"):
@@ -2075,8 +2110,8 @@ class MainWindow(QMainWindow):
         if row < 0:
             QMessageBox.information(self, "VOIDEX", "Select a version in the catalog first.")
             return
-        version_id = self.version_table.item(row, 0).text()
         self._choose_table_version()
+        version_id = str(self.selected_version)
         entry = next((v for v in self.versions if v.get("id") == version_id), None)
         if not entry or not entry.get("url"):
             self.log(f"No metadata URL found for {version_id}.")
@@ -2448,7 +2483,24 @@ class MainWindow(QMainWindow):
         item = self.version_table.item(row, 0)
         if not item:
             return
-        self.selected_version = item.text()
+        chosen_version = item.text()
+        if self.selected_instance_id:
+            try:
+                pinned = resolve_instance_profile(
+                    Path.home() / ".voidex" / "profiles", self.selected_instance_id
+                )
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "VOIDEX", f"Selected instance is unavailable: {exc}")
+                return
+            if chosen_version != pinned["game_version"]:
+                QMessageBox.information(
+                    self, "VOIDEX",
+                    f"'{pinned['name']}' is pinned to Minecraft {pinned['game_version']}. "
+                    "Choose another instance to use a different Minecraft version."
+                )
+                self._apply_instance_version(pinned)
+                return
+        self.selected_version = chosen_version
         if self.selected_metadata_version != self.selected_version:
             self.selected_metadata = None
             self.selected_metadata_version = None
