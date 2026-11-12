@@ -1019,8 +1019,11 @@ def build_launch_plan(version_metadata, *, java_executable, client_jar,
         "resolution_height": str(height),
     }
     for optional_key in ("clientid", "auth_xuid"):
-        if isinstance(auth.get(optional_key), str) and auth[optional_key]:
-            placeholders[optional_key] = auth[optional_key]
+        optional_value = auth.get(optional_key, "")
+        if not isinstance(optional_value, str):
+            raise ValueError(f"Authentication field {optional_key} must be a string.")
+        # These identifiers are legitimately empty for an offline profile.
+        placeholders[optional_key] = optional_value
 
     arguments = version_metadata.get("arguments")
     if isinstance(arguments, dict):
