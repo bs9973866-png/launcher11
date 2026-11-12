@@ -1503,7 +1503,7 @@ def _fabric_json(path, opener=None):
 
 def fetch_fabric_loader_versions(game_version, opener=None):
     """Return validated Fabric loader builds supported by the selected Minecraft version."""
-    if not isinstance(game_version, str) or not re.fullmatch(r"\\d+\\.\\d+(?:\\.\\d+)?", game_version):
+    if not isinstance(game_version, str) or not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", game_version):
         raise ValueError("Choose a concrete Minecraft release for Fabric.")
     payload = _fabric_json(
         "/v2/versions/loader/" + quote(game_version, safe=""), opener=opener
@@ -1526,7 +1526,7 @@ def fetch_fabric_loader_versions(game_version, opener=None):
 
 
 def _download_fabric_installer(version, destination, opener=None, progress_callback=None):
-    if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\\.[0-9]+\\.[0-9]+", version):
+    if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise ValueError("Fabric installer version is invalid.")
     root = Path(destination).expanduser()
     root.mkdir(parents=True, exist_ok=True)
@@ -1594,7 +1594,7 @@ def _download_fabric_installer(version, destination, opener=None, progress_callb
 def install_fabric_loader(game_version, loader_version, java_executable, voidex_root,
                           progress_callback=None, opener=None, runner=None):
     """Run the official Fabric client installer and validate its generated launch profile."""
-    if not isinstance(game_version, str) or not re.fullmatch(r"\\d+\\.\\d+(?:\\.\\d+)?", game_version):
+    if not isinstance(game_version, str) or not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", game_version):
         raise ValueError("Minecraft version is invalid.")
     if not isinstance(loader_version, str) or not re.fullmatch(r"[0-9A-Za-z.+_-]{1,64}", loader_version):
         raise ValueError("Fabric loader version is invalid.")
@@ -1616,7 +1616,7 @@ def install_fabric_loader(game_version, loader_version, java_executable, voidex_
         item.get("version") for item in installers
         if isinstance(item, dict) and item.get("stable") is True
         and isinstance(item.get("version"), str)
-        and re.fullmatch(r"[0-9]+\\.[0-9]+\\.[0-9]+", item["version"])
+        and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", item["version"])
     ), None)
     if not installer_version:
         raise ValueError("Fabric did not provide a stable installer release.")
