@@ -347,6 +347,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "VOIDEX", "Select a version in the catalog first.")
             return
         version_id = self.version_table.item(row, 0).text()
+        self._choose_table_version()
         entry = next((v for v in self.versions if v.get("id") == version_id), None)
         if not entry or not entry.get("url"):
             self.log(f"No metadata URL found for {version_id}.")
