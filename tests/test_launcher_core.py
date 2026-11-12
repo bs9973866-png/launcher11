@@ -18,7 +18,8 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            _fetch_temurin_asset, install_temurin_runtime,
                            search_modrinth_mods, fetch_modrinth_compatible_version,
                            download_verified_modrinth_file, list_installed_mods,
-                           remove_installed_mod)
+                           remove_installed_mod, fetch_fabric_loader_versions,
+                           merge_fabric_profile_metadata)
 
 
 def sample_metadata():
@@ -826,6 +827,101 @@ class ModrinthIntegrationTests(unittest.TestCase):
 
 
 
+
+
+
+class FabricLoaderTests(unittest.TestCase):
+    class JsonResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self, _size=-1):
+            return self.payload
+
+    class JsonOpener:
+        def __init__(self, payload):
+            self.payload = payload
+            self.url = None
+
+        def open(self, request, timeout=0):
+            self.url = request.full_url
+            return FabricLoaderTests.JsonResponse(self.payload)
+
+    def test_fetches_and_validates_fabric_loader_versions(self):
+        payload = json.dumps([
+            {"loader": {"version": "0.16.10", "stable": True}},
+            {"loader": {"version": "0.17.0-beta.1", "stable": False}},
+            {"loader": {"version": "../unsafe", "stable": True}},
+        ]).encode()
+        opener = self.JsonOpener(payload)
+        versions = fetch_fabric_loader_versions("1.21.4", opener=opener)
+        self.assertEqual([item["version"] for item in versions], ["0.16.10", "0.17.0-beta.1"])
+        self.assertEqual(opener.url, "https://meta.fabricmc.net/v2/versions/loader/1.21.4")
+
+    def test_rejects_invalid_minecraft_version_before_network(self):
+        with self.assertRaisesRegex(ValueError, "concrete Minecraft"):
+            fetch_fabric_loader_versions("../latest")
+
+    def test_merges_fabric_profile_and_existing_maven_libraries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            relative = Path("net/fabricmc/fabric-loader/0.16.10/fabric-loader-0.16.10.jar")
+            library = root / relative
+            library.parent.mkdir(parents=True)
+            library.write_bytes(b"fabric-loader")
+            base = {
+                "id": "1.21.4",
+                "mainClass": "net.minecraft.client.main.Main",
+                "libraries": [],
+                "arguments": {"jvm": ["-Dvanilla=true"], "game": ["--demo"]},
+                "javaVersion": {"majorVersion": 21},
+                "downloads": {"client": {"url": "https://example.invalid/client.jar"}},
+            }
+            profile = {
+                "id": "fabric-loader-0.16.10-1.21.4",
+                "inheritsFrom": "1.21.4",
+                "mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+                "libraries": [{
+                    "name": "net.fabricmc:fabric-loader:0.16.10",
+                    "url": "https://maven.fabricmc.net/",
+                }],
+                "arguments": {"jvm": ["-Dfabric=true"], "game": []},
+            }
+            merged = merge_fabric_profile_metadata(base, profile, root)
+            self.assertEqual(merged["id"], profile["id"])
+            self.assertEqual(merged["mainClass"], profile["mainClass"])
+            self.assertEqual(merged["javaVersion"], {"majorVersion": 21})
+            self.assertEqual(merged["arguments"]["jvm"], ["-Dvanilla=true", "-Dfabric=true"])
+            artifact = merged["libraries"][0]["downloads"]["artifact"]
+            self.assertEqual(artifact["path"], relative.as_posix())
+            self.assertEqual(artifact["size"], len(b"fabric-loader"))
+            self.assertEqual(artifact["sha1"], hashlib.sha1(b"fabric-loader").hexdigest())
+
+    def test_rejects_fabric_profile_for_another_game_version(self):
+        with self.assertRaisesRegex(ValueError, "does not inherit"):
+            merge_fabric_profile_metadata(
+                {"id": "1.21.4", "libraries": []},
+                {"id": "fabric-loader-0.16.10-1.21.1", "inheritsFrom": "1.21.1",
+                 "mainClass": "example.Main", "libraries": []},
+                Path("."),
+            )
+
+    def test_missing_fabric_library_blocks_launch_profile_merge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "library is missing"):
+                merge_fabric_profile_metadata(
+                    {"id": "1.21.4", "libraries": []},
+                    {"id": "fabric-loader-0.16.10-1.21.4", "inheritsFrom": "1.21.4",
+                     "mainClass": "example.Main",
+                     "libraries": [{"name": "net.fabricmc:fabric-loader:0.16.10"}]},
+                    Path(directory),
+                )
 
 
 class InstalledModManagementTests(unittest.TestCase):
