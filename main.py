@@ -491,7 +491,7 @@ class MainWindow(QMainWindow):
         self.download_button.setEnabled(True)
         self.version_json_button.setEnabled(True)
         self.library_button.setEnabled(True)
-        self.asset_button.setEnabled(True)
+        self.asset_button.setEnabled(bool(summary["asset_index"]))
         self.version_status.setText(
             f"{version_id}: {java} • client JAR {size_mb:.1f} MiB • "
             f"{summary['libraries_count']} libraries • assets {summary['asset_index'] or 'n/a'}"
