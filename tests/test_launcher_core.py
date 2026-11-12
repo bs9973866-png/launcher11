@@ -19,7 +19,7 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            _fetch_temurin_asset, install_temurin_runtime,
                            search_modrinth_mods, fetch_modrinth_compatible_version,
                            download_verified_modrinth_file, list_installed_mods,
-                           remove_installed_mod, fetch_fabric_loader_versions, fetch_forge_loader_versions, _download_forge_installer,
+                           remove_installed_mod, _validated_native_member_name, fetch_fabric_loader_versions, fetch_forge_loader_versions, _download_forge_installer,
                            install_fabric_loader, merge_fabric_profile_metadata, merge_forge_profile_metadata,
                            fetch_neoforge_loader_versions, _download_neoforge_installer, merge_neoforge_profile_metadata, fetch_quilt_loader_versions, fetch_quilt_installer_versions, _download_quilt_installer, install_quilt_loader, merge_quilt_profile_metadata, install_modrinth_mrpack)
 
@@ -338,7 +338,7 @@ class LibraryDownloadTests(unittest.TestCase):
             target.write_bytes(self.payload)
             opener = Mock()
             result = download_verified_library(self.artifact, directory, opener=opener)
-            self.assertEqual(result, target)
+            self.assertEqual(result, target.resolve())
             opener.open.assert_not_called()
 
     def test_hash_mismatch_preserves_old_file_and_cleans_temp(self):
@@ -641,7 +641,7 @@ class TemurinRuntimeTests(unittest.TestCase):
                 ("jdk-test/release", b"JAVA_VERSION=21"),
             ])
             java = safe_extract_temurin_zip(archive, Path(directory) / "out")
-            self.assertEqual(java.relative_to(Path(directory) / "out").as_posix(),
+            self.assertEqual(java.relative_to((Path(directory) / "out").resolve()).as_posix(),
                              "jdk-test/bin/java.exe")
             self.assertEqual(java.read_bytes(), b"java-binary")
 
@@ -1635,7 +1635,7 @@ class InstalledModManagementTests(unittest.TestCase):
             keep = root / "other.jar"
             target.write_bytes(b"mod")
             keep.write_bytes(b"keep")
-            self.assertEqual(remove_installed_mod(root, "sodium.jar"), target)
+            self.assertEqual(remove_installed_mod(root, "sodium.jar"), target.resolve())
             self.assertFalse(target.exists())
             self.assertEqual(keep.read_bytes(), b"keep")
 
@@ -1740,7 +1740,7 @@ class LaunchPlanTests(unittest.TestCase):
         result = build_minecraft_classpath(
             metadata, self.client, self.libs, os_name="windows", arch="x86_64"
         )
-        self.assertIn(str(self.client), result)
+        self.assertIn(str(self.client.resolve()), result)
         self.assertIn("demo-1.0.jar", result)
         self.assertNotIn("native.jar", result)
         self.assertIn(";", result)
@@ -1763,11 +1763,11 @@ class LaunchPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan["main_class"], "net.minecraft.client.main.Main")
         self.assertIn("PlayerOne", plan["game_arguments"])
-        self.assertIn(str(self.game), plan["game_arguments"])
+        self.assertIn(str(self.game.resolve()), plan["game_arguments"])
         self.assertIn("1280", plan["game_arguments"])
         self.assertIn("-Dvoidex.windows=true", plan["jvm_arguments"])
         self.assertEqual(plan["argv"][0], str(self.java))
-        self.assertEqual(plan["cwd"], str(self.game))
+        self.assertEqual(plan["cwd"], str(self.game.resolve()))
 
     def test_argument_rules_exclude_other_platform(self):
         metadata = dict(self.metadata)
@@ -1797,7 +1797,7 @@ class LaunchPlanTests(unittest.TestCase):
             os_name="linux", arch="x86_64",
         )
         self.assertEqual(plan["game_arguments"][1], "PlayerOne")
-        self.assertEqual(plan["game_arguments"][3], str(self.game))
+        self.assertEqual(plan["game_arguments"][3], str(self.game.resolve()))
 
     def test_unresolved_placeholder_and_incomplete_auth_are_rejected(self):
         metadata = dict(self.metadata)
