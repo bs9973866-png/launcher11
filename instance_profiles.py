@@ -15,7 +15,7 @@ from pathlib import Path
 
 _PROFILE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 _PROFILE_NAME_MAX = 48
-_PROFILE_VERSION_RE = re.compile(r"^\\d+\\.\\d+(?:\\.\\d+)?$")
+_PROFILE_VERSION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
 _ALLOWED_LOADERS = {"vanilla", "fabric", "forge", "neoforge", "quilt"}
 _PROFILE_SCHEMA = 1
 
@@ -94,7 +94,7 @@ def create_instance_profile(root, name, game_version, loader="vanilla") -> dict:
     try:
         with temporary.open("x", encoding="utf-8") as stream:
             json.dump(profile, stream, ensure_ascii=False, indent=2)
-            stream.write("\\n")
+            stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, target)
