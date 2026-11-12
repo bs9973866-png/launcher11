@@ -23,9 +23,9 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             install_modrinth_mrpack)
 from instance_profiles import (create_instance_profile, list_instance_profiles, resolve_instance_profile,
                                 rename_instance_profile, delete_instance_profile, update_instance_profile_loader,
-                                set_instance_profile_loader_profile, resolve_instance_mods_directory)
+                                set_instance_profile_loader_profile, resolve_instance_mods_directory,\n                                resolve_instance_resource_directories)
 
-from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
+from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer, QUrl\nfrom PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QInputDialog,
     QMainWindow, QPushButton, QPlainTextEdit, QStackedWidget, QVBoxLayout,
@@ -969,6 +969,34 @@ class MainWindow(QMainWindow):
             return Path(selected["game_directory_path"])
         return root / "instances" / str(version)
 
+    def open_instance_content_folder(self, folder_name):
+        """Open the active instance's resource-pack or shader-pack directory."""
+        if folder_name not in {"resourcepacks", "shaderpacks"}:
+            self.log(f"Refused unsupported instance content folder: {folder_name}")
+            return
+        try:
+            version = str(self.selected_version)
+            if self.selected_instance_id:
+                directories = resolve_instance_resource_directories(
+                    Path.home() / ".voidex" / "profiles",
+                    str(self.selected_instance_id), version,
+                )
+                directory = directories[folder_name]
+            else:
+                directory = self._game_directory_for_version(version) / folder_name
+                if directory.is_symlink():
+                    raise ValueError(f"{folder_name} directory is a symbolic link.")
+            directory.mkdir(parents=True, exist_ok=True)
+            if directory.is_symlink():
+                raise ValueError(f"{folder_name} directory is a symbolic link.")
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory.resolve()))):
+                raise OSError("Windows could not open the selected folder.")
+            self.instance_status.setText(f"Opened {folder_name} for Minecraft {version}.")
+            self.log(f"Opened instance {folder_name} folder: {directory}")
+        except (OSError, ValueError) as exc:
+            self.instance_status.setText(f"Could not open {folder_name}: {exc}")
+            self.log(f"Instance folder open failed: {exc}")
+
     def refresh_instance_profiles(self):
         if not hasattr(self, "instance_selector"):
             return
@@ -1232,6 +1260,18 @@ class MainWindow(QMainWindow):
         self.instance_status = QLabel("Each instance has its own worlds, mods and settings folder.")
         self.instance_status.setObjectName("Muted")
         hero_layout.addWidget(self.instance_status)
+        content_folders = QHBoxLayout()
+        self.resourcepacks_button = QPushButton("Open resource packs")
+        self.resourcepacks_button.clicked.connect(
+            lambda: self.open_instance_content_folder("resourcepacks")
+        )
+        self.shaderpacks_button = QPushButton("Open shader packs")
+        self.shaderpacks_button.clicked.connect(
+            lambda: self.open_instance_content_folder("shaderpacks")
+        )
+        content_folders.addWidget(self.resourcepacks_button)
+        content_folders.addWidget(self.shaderpacks_button)
+        hero_layout.addLayout(content_folders)
         self.launch_button = QPushButton("LAUNCH MINECRAFT")
         self.launch_button.setObjectName("Primary")
         self.launch_button.clicked.connect(self.launch_selected_game)
