@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from launcher_core import fetch_version_metadata, summarize_version_metadata, download_verified_client
+from launcher_core import fetch_version_metadata, summarize_version_metadata, download_verified_client, download_verified_version_json
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal
 from PySide6.QtWidgets import (
@@ -106,6 +106,28 @@ class ClientDownloadWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class VersionJsonWorker(QThread):
+    progress = Signal(int, int)
+    completed = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, metadata_url, expected_sha1, destination, parent=None):
+        super().__init__(parent)
+        self.metadata_url = metadata_url
+        self.expected_sha1 = expected_sha1
+        self.destination = destination
+
+    def run(self):
+        try:
+            path = download_verified_version_json(
+                self.metadata_url, self.expected_sha1, self.destination,
+                progress_callback=lambda done, total: self.progress.emit(done, total),
+            )
+            self.completed.emit(str(path))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -113,6 +135,7 @@ class MainWindow(QMainWindow):
         self.manifest_worker = None
         self.metadata_worker = None
         self.download_worker = None
+        self.version_json_worker = None
         self.selected_metadata = None
         self.selected_metadata_version = None
         self.versions = []
@@ -283,10 +306,14 @@ class MainWindow(QMainWindow):
         self.download_button = QPushButton("Download client JAR")
         self.download_button.setEnabled(False)
         self.download_button.clicked.connect(self.download_selected_client)
+        self.version_json_button = QPushButton("Cache version JSON")
+        self.version_json_button.setEnabled(False)
+        self.version_json_button.clicked.connect(self.cache_selected_version_json)
         bottom.addWidget(self.version_status, 1)
         bottom.addWidget(self.selected_version_label)
         bottom.addWidget(self.inspect_button)
         bottom.addWidget(self.download_button)
+        bottom.addWidget(self.version_json_button)
         bottom.addWidget(choose)
         layout.addLayout(bottom)
         return page
@@ -371,6 +398,7 @@ class MainWindow(QMainWindow):
         self.selected_metadata = summary
         self.selected_metadata_version = version_id
         self.download_button.setEnabled(True)
+        self.version_json_button.setEnabled(True)
         self.version_status.setText(
             f"{version_id}: {java} • client JAR {size_mb:.1f} MiB • "
             f"{summary['libraries_count']} libraries • assets {summary['asset_index'] or 'n/a'}"
@@ -379,6 +407,54 @@ class MainWindow(QMainWindow):
             f"{version_id} metadata validated: {java}; SHA-1 {summary['client_sha1']}."
         )
         self.metadata_worker = None
+
+
+    def cache_selected_version_json(self):
+        if self.version_json_worker and self.version_json_worker.isRunning():
+            return
+        if self.selected_metadata_version != self.selected_version:
+            QMessageBox.information(self, "VOIDEX", "Inspect the selected version first.")
+            return
+        entry = next((item for item in self.versions
+                      if item.get("id") == self.selected_version), None)
+        if not entry or not entry.get("url") or not entry.get("sha1"):
+            self.log("Selected manifest entry has no version JSON URL or SHA-1.")
+            return
+        destination = (Path.home() / ".voidex" / "cache" / "versions"
+                       / self.selected_version / f"{self.selected_version}.json")
+        self.version_json_button.setEnabled(False)
+        self.version_status.setText(f"Caching verified version JSON for {self.selected_version}...")
+        self.version_json_worker = VersionJsonWorker(
+            entry["url"], entry["sha1"], destination, self
+        )
+        self.version_json_worker.progress.connect(self._version_json_progress)
+        self.version_json_worker.completed.connect(self._version_json_completed)
+        self.version_json_worker.failed.connect(self._version_json_failed)
+        self.version_json_worker.finished.connect(
+            lambda: self.version_json_button.setEnabled(True)
+        )
+        self.version_json_worker.start()
+        self.log(f"Downloading version JSON for {self.selected_version} with manifest SHA-1 verification.")
+
+    def _version_json_progress(self, downloaded, total):
+        if total:
+            self.version_status.setText(
+                f"Version JSON: {downloaded / 1024:.1f} / {total / 1024:.1f} KiB"
+            )
+        else:
+            self.version_status.setText(
+                f"Version JSON: {downloaded / 1024:.1f} KiB received"
+            )
+
+    def _version_json_completed(self, path):
+        self.version_status.setText(f"Version JSON cached and verified: {path}")
+        self.log(f"Verified version JSON cached at: {path}")
+        self.version_json_worker = None
+
+    def _version_json_failed(self, error):
+        self.version_status.setText("Version JSON caching failed; invalid data was not saved.")
+        self.log(f"Version JSON error: {error}")
+        self.version_json_worker = None
 
     def download_selected_client(self):
         if not self.selected_metadata or self.selected_metadata_version != self.selected_version:
@@ -418,6 +494,7 @@ class MainWindow(QMainWindow):
         self.selected_metadata = None
         self.selected_metadata_version = None
         self.download_button.setEnabled(False)
+        self.version_json_button.setEnabled(False)
         self.version_status.setText("Could not inspect version metadata.")
         self.log(f"Version metadata error: {error}")
         self.metadata_worker = None
@@ -434,6 +511,7 @@ class MainWindow(QMainWindow):
             self.selected_metadata = None
             self.selected_metadata_version = None
             self.download_button.setEnabled(False)
+            self.version_json_button.setEnabled(False)
         self.selected_version_label.setText(f"Selected: {self.selected_version}")
         self.home_version.setText(f"Selected version: {self.selected_version}")
         self.settings.setValue("selected_version", self.selected_version)
