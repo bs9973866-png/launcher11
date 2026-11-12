@@ -1595,8 +1595,9 @@ def _download_mrpack_file(item, destination, opener=None, progress_callback=None
 
 
 def install_modrinth_mrpack(archive_path, voidex_root, java_executable="",
-                            progress_callback=None, opener=None, runner=None):
-    """Validate and import a Modrinth .mrpack into its Minecraft-version instance."""
+                            progress_callback=None, opener=None, runner=None,
+                            instance_directory=None):
+    """Validate and import a Modrinth .mrpack into the default or supplied instance."""
     archive = Path(archive_path).expanduser()
     if archive.is_symlink() or not archive.is_file() or archive.stat().st_size > 100 * 1024 * 1024:
         raise ValueError("Select a valid .mrpack archive (maximum 100 MiB).")
@@ -1718,11 +1719,28 @@ def install_modrinth_mrpack(archive_path, voidex_root, java_executable="",
                 staged_files[relative.as_posix()] = stage_target
                 override_entries.append(relative.as_posix())
 
-        instance = root / "instances" / game_version
-        if instance.is_symlink():
-            raise ValueError("Minecraft instance directory must not be a symbolic link.")
-        instance.mkdir(parents=True, exist_ok=True)
-        instance_root = instance.resolve()
+        if instance_directory is None:
+            instance = root / "instances" / game_version
+            if instance.is_symlink():
+                raise ValueError("Minecraft instance directory must not be a symbolic link.")
+            instance.mkdir(parents=True, exist_ok=True)
+            instance_root = instance.resolve()
+        else:
+            instance = Path(instance_directory).expanduser()
+            if not instance.is_absolute():
+                raise ValueError("Named instance destination must be an absolute path.")
+            current = instance
+            while current != current.parent:
+                if current.is_symlink():
+                    raise ValueError("Named instance destination contains a symbolic link.")
+                current = current.parent
+            if not instance.is_dir():
+                raise ValueError("Named instance destination does not exist.")
+            instance_root = instance.resolve()
+            try:
+                instance_root.relative_to((root / "profiles").resolve())
+            except ValueError as exc:
+                raise ValueError("Named instance destination must be inside VOIDEX profiles.") from exc
         for raw_relative, staged_path in staged_files.items():
             relative = _mrpack_relative_path(raw_relative)
             target = instance_root / Path(*relative.parts)
