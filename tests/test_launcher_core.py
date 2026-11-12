@@ -12,7 +12,8 @@ import urllib.request
 from launcher_core import (download_verified_client, download_verified_library, download_verified_libraries, download_verified_version_json,
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata,
                            extract_native_archives, discover_java_candidates, validate_java_executable,
-                           build_minecraft_classpath, build_launch_plan)
+                           build_minecraft_classpath, build_launch_plan,
+                           verify_cached_asset_objects)
 
 
 def sample_metadata():
@@ -785,3 +786,68 @@ class LaunchPlanTests(unittest.TestCase):
                 java_validation={"compatible": False, "path": str(self.java)},
                 os_name="windows", arch="x86_64",
             )
+
+
+class LaunchIntegrityTests(unittest.TestCase):
+    def test_classpath_rejects_library_hash_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = b"original"
+            library = {
+                "name": "org.example:tampered:1.0",
+                "downloads": {"artifact": {
+                    "path": "org/example/tampered/1.0/tampered.jar",
+                    "url": "https://libraries.minecraft.net/org/example/tampered/1.0/tampered.jar",
+                    "sha1": hashlib.sha1(payload).hexdigest(),
+                    "size": len(payload),
+                }},
+            }
+            target = root / "org/example/tampered/1.0/tampered.jar"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"tampered")
+            client = root / "client.jar"
+            client.write_bytes(b"client")
+            with self.assertRaisesRegex(ValueError, "size mismatch|SHA-1 mismatch"):
+                build_minecraft_classpath(
+                    {"libraries": [library]}, client, root,
+                    os_name="windows", arch="x86_64",
+                )
+
+    def test_asset_index_objects_are_verified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = b"sound-data"
+            digest = hashlib.sha1(payload).hexdigest()
+            index = root / "indexes" / "test.json"
+            index.parent.mkdir()
+            index.write_text(json.dumps({
+                "objects": {"sounds/test.ogg": {"hash": digest, "size": len(payload)}}
+            }), encoding="utf-8")
+            objects = root / "objects" / digest[:2]
+            objects.mkdir(parents=True)
+            (objects / digest).write_bytes(payload)
+            result = verify_cached_asset_objects(index, root / "objects")
+            self.assertEqual(result["count"], 1)
+            (objects / digest).write_bytes(b"bad")
+            with self.assertRaisesRegex(ValueError, "size mismatch|SHA-1 mismatch"):
+                verify_cached_asset_objects(index, root / "objects")
+
+    def test_asset_index_rejects_symlinked_object(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = b"sound-data"
+            digest = hashlib.sha1(payload).hexdigest()
+            index = root / "index.json"
+            index.write_text(json.dumps({
+                "objects": {"sounds/test.ogg": {"hash": digest, "size": len(payload)}}
+            }), encoding="utf-8")
+            objects = root / "objects" / digest[:2]
+            objects.mkdir(parents=True)
+            outside = root / "outside"
+            outside.write_bytes(payload)
+            try:
+                (objects / digest).symlink_to(outside)
+            except (OSError, NotImplementedError):
+                self.skipTest("Symlinks are unavailable on this runner.")
+            with self.assertRaisesRegex(ValueError, "symbolic-link"):
+                verify_cached_asset_objects(index, root / "objects")
