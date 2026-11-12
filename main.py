@@ -18,7 +18,7 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod,
                             fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata,
                             fetch_forge_loader_versions, install_forge_loader, merge_forge_profile_metadata,
-                            fetch_neoforge_loader_versions, install_neoforge_loader)
+                            fetch_neoforge_loader_versions, install_neoforge_loader, merge_neoforge_profile_metadata)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -581,11 +581,12 @@ class LaunchCheckWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, version_id, manifest_entry, java_executable, ram_mb,
-                 extra_jvm, account_source, nickname, fabric_profile_id=None, forge_profile_id=None, parent=None):
+                 extra_jvm, account_source, nickname, fabric_profile_id=None, forge_profile_id=None, neoforge_profile_id=None, parent=None):
         super().__init__(parent)
         self.version_id = version_id
         self.fabric_profile_id = fabric_profile_id
         self.forge_profile_id = forge_profile_id
+        self.neoforge_profile_id = neoforge_profile_id
         self.manifest_entry = dict(manifest_entry)
         self.java_executable = java_executable
         self.ram_mb = ram_mb
@@ -613,10 +614,17 @@ class LaunchCheckWorker(QThread):
                 metadata = json.load(stream)
             if metadata.get("id") != self.version_id:
                 raise ValueError("Cached version JSON does not match the selected version.")
-            if self.fabric_profile_id and self.forge_profile_id:
+            active_loaders = [
+                name for name, profile_id in (
+                    ("Fabric", self.fabric_profile_id),
+                    ("Forge", self.forge_profile_id),
+                    ("NeoForge", self.neoforge_profile_id),
+                ) if profile_id
+            ]
+            if len(active_loaders) > 1:
                 raise ValueError(
-                    "Both Fabric and Forge profiles are selected for this Minecraft version. "
-                    "Keep only one loader profile active before launching."
+                    "Multiple loader profiles are selected (" + ", ".join(active_loaders) +
+                    "). Keep only one loader profile active before launching."
                 )
             if self.fabric_profile_id:
                 profile_path = home / "versions" / self.fabric_profile_id / f"{self.fabric_profile_id}.json"
@@ -632,6 +640,13 @@ class LaunchCheckWorker(QThread):
                 with profile_path.open("r", encoding="utf-8") as stream:
                     forge_profile = json.load(stream)
                 metadata = merge_forge_profile_metadata(metadata, forge_profile, home / "libraries")
+            if self.neoforge_profile_id:
+                profile_path = home / "versions" / self.neoforge_profile_id / f"{self.neoforge_profile_id}.json"
+                if profile_path.is_symlink() or not profile_path.is_file():
+                    raise ValueError("Installed NeoForge profile is missing. Reinstall NeoForge from the Mods page.")
+                with profile_path.open("r", encoding="utf-8") as stream:
+                    neoforge_profile = json.load(stream)
+                metadata = merge_neoforge_profile_metadata(metadata, neoforge_profile, home / "libraries")
 
             client = home / "cache" / "clients" / f"{self.version_id}.jar"
             client_ref = (metadata.get("downloads") or {}).get("client") or {}
@@ -1149,7 +1164,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("neoforge_profile_id", self.neoforge_profile_id)
         self.settings.setValue("neoforge_profile_game_version", self.neoforge_profile_game_version)
         self.neoforge_status.setText(
-            f"NeoForge profile installed: {self.neoforge_profile_id}. Launch integration is the next step."
+            f"NeoForge profile installed and ready for launch: {self.neoforge_profile_id}."
         )
         self.log(f"NeoForge profile installed and validated: {self.neoforge_profile_id}")
 
@@ -2156,7 +2171,8 @@ class MainWindow(QMainWindow):
             int(self.ram.currentText()), extra_jvm,
             self.account_source.currentText(), self.player_name.text().strip(),
             self.fabric_profile_id if self.fabric_profile_game_version == self.selected_version else None,
-            self.forge_profile_id if self.forge_profile_game_version == self.selected_version else None, self,
+            self.forge_profile_id if self.forge_profile_game_version == self.selected_version else None,
+            self.neoforge_profile_id if self.neoforge_profile_game_version == self.selected_version else None, self,
         )
         self.launch_worker.ready.connect(self._launch_plan_ready)
         self.launch_worker.failed.connect(self._launch_plan_failed)
