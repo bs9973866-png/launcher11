@@ -814,7 +814,7 @@ class MainWindow(QMainWindow):
 
     def refresh_installed_mods(self):
         version = self.modrinth_game_version.text().strip()
-        if not __import__("re").fullmatch(r"\\d+\\.\\d+(?:\\.\\d+)?", version):
+        if not __import__("re").fullmatch(r"\d+\.\d+(?:\.\d+)?", version):
             self.modrinth_status.setText("Enter a valid Minecraft version to inspect its mods folder.")
             return
         directory = Path.home() / ".voidex" / "instances" / version / "mods"
@@ -845,7 +845,7 @@ class MainWindow(QMainWindow):
         item = self.installed_mods_table.item(row, 0)
         filename = item.data(Qt.ItemDataRole.UserRole) if item else None
         version = self.modrinth_game_version.text().strip()
-        if not __import__("re").fullmatch(r"\\d+\\.\\d+(?:\\.\\d+)?", version):
+        if not __import__("re").fullmatch(r"\d+\.\d+(?:\.\d+)?", version):
             self.modrinth_status.setText("Enter a valid Minecraft version first.")
             return
         answer = QMessageBox.question(
