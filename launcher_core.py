@@ -1522,6 +1522,7 @@ def fetch_fabric_loader_versions(game_version, opener=None):
             })
     if not results:
         raise ValueError(f"Fabric has no compatible loader builds for Minecraft {game_version}.")
+    results.sort(key=lambda item: not item["stable"])
     return results
 
 
@@ -1601,6 +1602,8 @@ def install_fabric_loader(game_version, loader_version, java_executable, voidex_
     java = Path(java_executable).expanduser()
     if java.is_symlink() or not java.is_file():
         raise ValueError("Select a valid Java executable before installing Fabric.")
+    java_validation = validate_java_executable(java)
+    java = Path(java_validation["path"])
     root = Path(voidex_root).expanduser()
     if root.is_symlink():
         raise ValueError("VOIDEX data directory must not be a symbolic link.")
