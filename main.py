@@ -10,7 +10,7 @@ from pathlib import Path
 
 from launcher_core import (fetch_version_metadata, summarize_version_metadata, download_verified_client,
                             download_verified_version_json, resolve_library_artifacts,
-                            download_verified_libraries, resolve_asset_objects, extract_native_archives)
+                            download_verified_libraries, resolve_asset_objects, extract_native_archives,\n                            discover_java_candidates, validate_java_executable)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal
 from PySide6.QtWidgets import (
@@ -251,6 +251,33 @@ class AssetInstallWorker(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+
+class JavaCheckWorker(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, executable=None, expected_major=None, parent=None):
+        super().__init__(parent)
+        self.executable = executable
+        self.expected_major = expected_major
+
+    def run(self):
+        try:
+            candidates = [Path(self.executable)] if self.executable else discover_java_candidates()
+            results = []
+            for candidate in candidates:
+                try:
+                    results.append(validate_java_executable(candidate, self.expected_major))
+                except ValueError:
+                    continue
+            if not results:
+                raise ValueError("No working Java executable was found. Install Java or enter its full path.")
+            selected = next((item for item in results if item["compatible"]), results[0])
+            self.completed.emit(selected)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -262,6 +289,7 @@ class MainWindow(QMainWindow):
         self.library_worker = None
         self.asset_worker = None
         self.native_worker = None
+        self.java_worker = None
         self.selected_metadata = None
         self.selected_metadata_version = None
         self.versions = []
@@ -886,6 +914,20 @@ class MainWindow(QMainWindow):
         self.renderer.addItems(["Compatibility", "Default", "Performance"])
         self.jvm = QLineEdit()
         self.jvm.setPlaceholderText("Additional JVM arguments")
+        self.java_path = QLineEdit()
+        self.java_path.setPlaceholderText("Full path to java.exe (optional)")
+        self.java_status = QLabel("Java has not been checked yet.")
+        self.java_status.setObjectName("Muted")
+        java_actions = QHBoxLayout()
+        self.detect_java_button = QPushButton("Detect Java")
+        self.detect_java_button.clicked.connect(self.detect_java)
+        self.validate_java_button = QPushButton("Validate path")
+        self.validate_java_button.clicked.connect(self.validate_selected_java)
+        java_actions.addWidget(self.detect_java_button)
+        java_actions.addWidget(self.validate_java_button)
+        form.addLayout(self._form_row("Java executable", self.java_path))
+        form.addRow("", java_actions)
+        form.addRow("", self.java_status)
         form.addLayout(self._form_row("PC profile", self.preset))
         form.addLayout(self._form_row("Memory allocation (MB)", self.ram))
         form.addLayout(self._form_row("Rendering profile", self.renderer))
@@ -901,6 +943,62 @@ class MainWindow(QMainWindow):
         layout.addWidget(save)
         layout.addStretch()
         return page
+
+
+    def _required_java_major(self):
+        if self.selected_metadata and self.selected_metadata_version == self.selected_version:
+            return self.selected_metadata.get("java_major")
+        return None
+
+    def detect_java(self):
+        if self.java_worker and self.java_worker.isRunning():
+            return
+        self._start_java_check(None)
+
+    def validate_selected_java(self):
+        if self.java_worker and self.java_worker.isRunning():
+            return
+        executable = self.java_path.text().strip()
+        if not executable:
+            self.java_status.setText("Enter the full path to java.exe or use Detect Java.")
+            return
+        self._start_java_check(executable)
+
+    def _start_java_check(self, executable):
+        self.detect_java_button.setEnabled(False)
+        self.validate_java_button.setEnabled(False)
+        self.java_status.setText("Checking Java runtime...")
+        self.java_worker = JavaCheckWorker(executable, self._required_java_major(), self)
+        self.java_worker.completed.connect(self._java_check_completed)
+        self.java_worker.failed.connect(self._java_check_failed)
+        self.java_worker.finished.connect(self._java_check_finished)
+        self.java_worker.start()
+
+    def _java_check_completed(self, result):
+        self.java_path.setText(result["path"])
+        if result["expected_major"] is None:
+            message = f"Java {result['version']} detected (major {result['major']})."
+        elif result["compatible"]:
+            message = (
+                f"Java {result['version']} is compatible with the selected version "
+                f"(requires {result['expected_major']}+)."
+            )
+        else:
+            message = (
+                f"Java {result['version']} is too old for the selected Minecraft version "
+                f"(requires {result['expected_major']}+)."
+            )
+        self.java_status.setText(message)
+        self.log(message)
+
+    def _java_check_failed(self, error):
+        self.java_status.setText(error)
+        self.log(f"Java detection error: {error}")
+
+    def _java_check_finished(self):
+        self.detect_java_button.setEnabled(True)
+        self.validate_java_button.setEnabled(True)
+        self.java_worker = None
 
     def _console_page(self):
         page = QWidget()
@@ -930,6 +1028,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("ram", self.ram.currentText())
         self.settings.setValue("renderer", self.renderer.currentText())
         self.settings.setValue("jvm", self.jvm.text())
+        self.settings.setValue("java_path", self.java_path.text().strip())
         self.settings.setValue("effects", self.effects.currentText())
         self.settings.setValue("account_source", self.account_source.currentText())
         self.settings.setValue("nickname", self.player_name.text())
@@ -941,6 +1040,7 @@ class MainWindow(QMainWindow):
         self.ram.setCurrentText(self.settings.value("ram", "4096"))
         self.renderer.setCurrentText(self.settings.value("renderer", "Default"))
         self.jvm.setText(self.settings.value("jvm", "-XX:+UseG1GC"))
+        self.java_path.setText(self.settings.value("java_path", ""))
         self.effects.setCurrentText(self.settings.value("effects", "Disabled (recommended)"))
         self.account_source.setCurrentText(self.settings.value("account_source", "Offline"))
         self.player_name.setText(self.settings.value("nickname", ""))
