@@ -8,7 +8,8 @@ from unittest.mock import Mock
 import urllib.request
 
 from launcher_core import (download_verified_client, download_verified_library, download_verified_libraries, download_verified_version_json,
-                           resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata,\n                           extract_native_archives)
+                           resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata,
+                           extract_native_archives)
 
 
 def sample_metadata():
