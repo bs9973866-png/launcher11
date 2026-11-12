@@ -952,7 +952,7 @@ class MainWindow(QMainWindow):
 
     def create_instance(self):
         version = str(self.selected_version)
-        if not __import__("re").fullmatch(r"\\d+\\.\\d+(?:\\.\\d+)?", version):
+        if not __import__("re").fullmatch(r"\d+\.\d+(?:\.\d+)?", version):
             QMessageBox.information(
                 self, "VOIDEX", "Select a concrete Minecraft version first, then create an instance."
             )
