@@ -20,7 +20,8 @@ from launcher_core import (download_verified_client, download_verified_library, 
                            search_modrinth_mods, fetch_modrinth_compatible_version,
                            download_verified_modrinth_file, list_installed_mods,
                            remove_installed_mod, fetch_fabric_loader_versions, fetch_forge_loader_versions, _download_forge_installer,
-                           install_fabric_loader, merge_fabric_profile_metadata, merge_forge_profile_metadata,\n                           fetch_neoforge_loader_versions, _download_neoforge_installer)
+                           install_fabric_loader, merge_fabric_profile_metadata, merge_forge_profile_metadata,
+                           fetch_neoforge_loader_versions, _download_neoforge_installer)
 
 
 def sample_metadata():
