@@ -21,7 +21,7 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             fetch_neoforge_loader_versions, install_neoforge_loader, merge_neoforge_profile_metadata,
                             fetch_quilt_loader_versions, install_quilt_loader, merge_quilt_profile_metadata,
                             install_modrinth_mrpack)
-from instance_profiles import create_instance_profile, list_instance_profiles, resolve_instance_profile
+from instance_profiles import (create_instance_profile, list_instance_profiles, resolve_instance_profile,\n                                rename_instance_profile, delete_instance_profile)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -951,6 +951,100 @@ class MainWindow(QMainWindow):
             )
         else:
             self.instance_status.setText("Default instance uses the shared version folder.")
+        busy = self._instance_management_busy()
+        if hasattr(self, "rename_instance_button"):
+            self.rename_instance_button.setEnabled(bool(self.selected_instance_id) and not busy)
+            self.remove_instance_button.setEnabled(bool(self.selected_instance_id) and not busy)
+
+    def _instance_management_busy(self):
+        for attribute in ("launch_worker", "modpack_import_worker", "modrinth_install_worker"):
+            worker = getattr(self, attribute, None)
+            if worker is not None and worker.isRunning():
+                return True
+        process = getattr(self, "minecraft_process", None)
+        return bool(
+            process is not None
+            and process.state() != QProcess.ProcessState.NotRunning
+        )
+
+    def rename_selected_instance(self):
+        if not self.selected_instance_id:
+            return
+        if self._instance_management_busy():
+            QMessageBox.information(
+                self, "VOIDEX", "Wait until the current launch or installation task finishes."
+            )
+            return
+        try:
+            profiles = list_instance_profiles(Path.home() / ".voidex" / "profiles")
+            current = next(
+                (item for item in profiles if item["id"] == self.selected_instance_id), None
+            )
+            if current is None:
+                raise ValueError("Selected instance no longer exists.")
+            name, accepted = QInputDialog.getText(
+                self, "Rename instance", "New instance name:", text=current["name"]
+            )
+            if not accepted:
+                return
+            renamed = rename_instance_profile(
+                Path.home() / ".voidex" / "profiles", self.selected_instance_id, name
+            )
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "VOIDEX", f"Could not rename instance: {exc}")
+            self.log(f"Instance rename failed: {exc}")
+            return
+        self.refresh_instance_profiles()
+        self.instance_status.setText(
+            f"Renamed to {renamed['name']}. Worlds, mods and settings stayed in the same folder."
+        )
+        self.log(f"Renamed instance {renamed['id']} to '{renamed['name']}'.")
+
+    def remove_selected_instance(self):
+        if not self.selected_instance_id:
+            return
+        if self._instance_management_busy():
+            QMessageBox.information(
+                self, "VOIDEX", "Wait until the current launch or installation task finishes."
+            )
+            return
+        try:
+            selected = resolve_instance_profile(
+                Path.home() / ".voidex" / "profiles", self.selected_instance_id
+            )
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "VOIDEX", f"Could not inspect instance: {exc}")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Remove instance",
+            f"Remove '{selected['name']}' from the VOIDEX instance list?\\n\\n"
+            "Its game files, worlds, mods and settings will be kept on disk. "
+            "Only the profile entry is removed, so this instance will no longer appear in the launcher.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            result = delete_instance_profile(
+                Path.home() / ".voidex" / "profiles", self.selected_instance_id
+            )
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "VOIDEX", f"Could not remove instance: {exc}")
+            self.log(f"Instance removal failed: {exc}")
+            return
+        removed_id = self.selected_instance_id
+        self.selected_instance_id = ""
+        self.settings.setValue("selected_instance_id", "")
+        self.refresh_instance_profiles()
+        self.instance_status.setText(
+            "Profile entry removed. Game files were preserved in the profiles folder."
+        )
+        self.log(
+            f"Removed instance entry {removed_id}; game data preserved "
+            f"(directory: {result.get('preserved_directory') or 'empty'})."
+        )
 
     def _instance_selection_changed(self, index):
         if not hasattr(self, "instance_selector") or index < 0:
@@ -1037,12 +1131,20 @@ class MainWindow(QMainWindow):
         self.instance_selector.currentIndexChanged.connect(self._instance_selection_changed)
         self.create_instance_button = QPushButton("＋ New instance")
         self.create_instance_button.clicked.connect(self.create_instance)
+        self.rename_instance_button = QPushButton("Rename")
+        self.rename_instance_button.setEnabled(False)
+        self.rename_instance_button.clicked.connect(self.rename_selected_instance)
+        self.remove_instance_button = QPushButton("Remove")
+        self.remove_instance_button.setEnabled(False)
+        self.remove_instance_button.clicked.connect(self.remove_selected_instance)
         self.refresh_instances_button = QPushButton("↻")
         self.refresh_instances_button.setToolTip("Refresh instance list")
         self.refresh_instances_button.clicked.connect(self.refresh_instance_profiles)
         instance_row.addWidget(QLabel("INSTANCE"))
         instance_row.addWidget(self.instance_selector, 1)
         instance_row.addWidget(self.create_instance_button)
+        instance_row.addWidget(self.rename_instance_button)
+        instance_row.addWidget(self.remove_instance_button)
         instance_row.addWidget(self.refresh_instances_button)
         hero_layout.addLayout(instance_row)
         self.instance_status = QLabel("Each instance has its own worlds, mods and settings folder.")
