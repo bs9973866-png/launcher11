@@ -478,9 +478,10 @@ class MainWindow(QMainWindow):
         self.log(f"Resolving and downloading verified Windows x64 libraries for {version_id}.")
 
     def _library_install_progress(self, completed, total, current_path):
+        stage = "Version JSON" if current_path == "version JSON" else "Libraries"
         if total:
             self.version_status.setText(
-                f"Libraries: {completed / (1024 * 1024):.1f} / "
+                f"{stage}: {completed / (1024 * 1024):.1f} / "
                 f"{total / (1024 * 1024):.1f} MiB • {current_path}"
             )
         else:
