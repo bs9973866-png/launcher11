@@ -22,7 +22,7 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             fetch_quilt_loader_versions, install_quilt_loader, merge_quilt_profile_metadata,
                             install_modrinth_mrpack)
 from instance_profiles import (create_instance_profile, list_instance_profiles, resolve_instance_profile,
-                                rename_instance_profile, delete_instance_profile, update_instance_profile_loader)
+                                rename_instance_profile, delete_instance_profile, update_instance_profile_loader,\n                                set_instance_profile_loader_profile)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -703,6 +703,21 @@ class LaunchCheckWorker(QThread):
                 metadata = json.load(stream)
             if metadata.get("id") != self.version_id:
                 raise ValueError("Cached version JSON does not match the selected version.")
+            if self.instance_profile_id:
+                selected_instance = resolve_instance_profile(
+                    home / "profiles", self.instance_profile_id, self.version_id
+                )
+                selected_loader = selected_instance["loader"]
+                selected_loader_profile = selected_instance.get("loader_profile_id")
+                self.fabric_profile_id = selected_loader_profile if selected_loader == "fabric" else None
+                self.forge_profile_id = selected_loader_profile if selected_loader == "forge" else None
+                self.neoforge_profile_id = selected_loader_profile if selected_loader == "neoforge" else None
+                self.quilt_profile_id = selected_loader_profile if selected_loader == "quilt" else None
+                if selected_loader != "vanilla" and not selected_loader_profile:
+                    raise ValueError(
+                        f"This instance is marked as {selected_loader.title()} but has no bound "
+                        "installed loader profile. Install that loader from the Mods page for this instance."
+                    )
             active_loaders = [
                 name for name, profile_id in (
                     ("Fabric", self.fabric_profile_id),
@@ -1611,6 +1626,7 @@ class MainWindow(QMainWindow):
                 "The Mods page version must match the selected Minecraft version. Select it on the Versions page first."
             )
             return
+        self.quilt_target_instance_id = self.selected_instance_id or None
         self.quilt_install_button.setEnabled(False)
         self.quilt_versions_button.setEnabled(False)
         self.quilt_status.setText("Preparing official Quilt installer...")
@@ -1628,6 +1644,7 @@ class MainWindow(QMainWindow):
         self.quilt_status.setText(stage)
 
     def _quilt_install_completed(self, result):
+        self._persist_selected_instance_loader("quilt", result, getattr(self, "quilt_target_instance_id", None))
         self.quilt_profile_id = result["profile_id"]
         self.quilt_profile_game_version = result["game_version"]
         self.settings.setValue("quilt_profile_id", self.quilt_profile_id)
@@ -1696,6 +1713,7 @@ class MainWindow(QMainWindow):
                 "The Mods page version must match the selected Minecraft version. Select it on the Versions page first."
             )
             return
+        self.neoforge_target_instance_id = self.selected_instance_id or None
         self.neoforge_install_button.setEnabled(False)
         self.neoforge_versions_button.setEnabled(False)
         self.neoforge_status.setText("Preparing official NeoForge installer...")
@@ -1713,6 +1731,7 @@ class MainWindow(QMainWindow):
         self.neoforge_status.setText(stage)
 
     def _neoforge_install_completed(self, result):
+        self._persist_selected_instance_loader("neoforge", result, getattr(self, "neoforge_target_instance_id", None))
         self.neoforge_profile_id = result["profile_id"]
         self.neoforge_profile_game_version = result["game_version"]
         self.settings.setValue("neoforge_profile_id", self.neoforge_profile_id)
@@ -1744,6 +1763,7 @@ class MainWindow(QMainWindow):
         if not java_executable:
             self.forge_status.setText("Set a valid Java executable in Settings first.")
             return
+        self.forge_target_instance_id = self.selected_instance_id or None
         self.forge_install_button.setEnabled(False)
         self.forge_versions_button.setEnabled(False)
         self.forge_status.setText("Preparing official Forge installer...")
@@ -1761,6 +1781,7 @@ class MainWindow(QMainWindow):
         self.forge_status.setText(stage)
 
     def _forge_install_completed(self, result):
+        self._persist_selected_instance_loader("forge", result, getattr(self, "forge_target_instance_id", None))
         self.forge_profile_id = result["profile_id"]
         self.forge_profile_game_version = result["game_version"]
         self.settings.setValue("forge_profile_id", self.forge_profile_id)
@@ -1796,6 +1817,7 @@ class MainWindow(QMainWindow):
                 "The Mods page version must match the selected Minecraft version. Select it on the Versions page first."
             )
             return
+        self.fabric_target_instance_id = self.selected_instance_id or None
         self.fabric_install_button.setEnabled(False)
         self.fabric_versions_button.setEnabled(False)
         self.fabric_status.setText("Preparing official Fabric installer...")
@@ -1814,7 +1836,33 @@ class MainWindow(QMainWindow):
         self.fabric_status.setText(stage + "...")
         self.log(stage + ".")
 
+    def _persist_selected_instance_loader(self, loader, result, target_instance_id):
+        if not target_instance_id:
+            return
+        try:
+            profile = set_instance_profile_loader_profile(
+                Path.home() / ".voidex" / "profiles",
+                target_instance_id,
+                result["game_version"],
+                loader,
+                result["profile_id"],
+            )
+            self.log(
+                f"Bound {loader.title()} profile {result['profile_id']} "
+                f"to instance '{profile['name']}'."
+            )
+            if target_instance_id == self.selected_instance_id:
+                self.refresh_instance_profiles()
+        except (OSError, ValueError) as exc:
+            self.log(f"Could not bind loader to named instance: {exc}")
+            QMessageBox.warning(
+                self, "VOIDEX",
+                "The loader was installed, but it could not be linked to the selected instance. "
+                f"Launch will not silently use another instance's loader. Details: {exc}"
+            )
+
     def _fabric_install_completed(self, result):
+        self._persist_selected_instance_loader("fabric", result, getattr(self, "fabric_target_instance_id", None))
         self.fabric_profile_id = result["profile_id"]
         self.fabric_profile_game_version = result["game_version"]
         self.settings.setValue("fabric_profile_id", self.fabric_profile_id)
