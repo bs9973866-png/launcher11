@@ -14,7 +14,8 @@ from launcher_core import (fetch_version_metadata, summarize_version_metadata, d
                             download_verified_libraries, resolve_asset_objects, extract_native_archives,
                             discover_java_candidates, validate_java_executable,
                             build_launch_plan, verify_cached_asset_objects,
-                            install_temurin_runtime)
+                            install_temurin_runtime, search_modrinth_mods,
+                            fetch_modrinth_compatible_version, download_verified_modrinth_file)
 
 from PySide6.QtCore import Qt, QSettings, QThread, Signal, QProcess, QTimer
 from PySide6.QtWidgets import (
@@ -56,6 +57,51 @@ def offline_uuid(username: str) -> str:
     digest[6] = (digest[6] & 0x0F) | 0x30
     digest[8] = (digest[8] & 0x3F) | 0x80
     return str(uuid.UUID(bytes=bytes(digest)))
+
+
+class ModrinthSearchWorker(QThread):
+    loaded = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, query, game_version, loader, parent=None):
+        super().__init__(parent)
+        self.query = query
+        self.game_version = game_version
+        self.loader = loader
+
+    def run(self):
+        try:
+            self.loaded.emit(search_modrinth_mods(
+                self.query, self.game_version, self.loader
+            ))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ModrinthInstallWorker(QThread):
+    progress = Signal(int, int)
+    completed = Signal(str, str)
+    failed = Signal(str)
+
+    def __init__(self, project, game_version, loader, mods_directory, parent=None):
+        super().__init__(parent)
+        self.project = project
+        self.game_version = game_version
+        self.loader = loader
+        self.mods_directory = Path(mods_directory)
+
+    def run(self):
+        try:
+            version = fetch_modrinth_compatible_version(
+                self.project["project_id"], self.game_version, self.loader
+            )
+            path = download_verified_modrinth_file(
+                version, self.mods_directory,
+                progress_callback=lambda done, total: self.progress.emit(done, total),
+            )
+            self.completed.emit(str(path), version["version_name"])
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class ManifestWorker(QThread):
@@ -601,7 +647,7 @@ class MainWindow(QMainWindow):
 
         self.pages.addWidget(self._overview_page())
         self.pages.addWidget(self._versions_page())
-        self.pages.addWidget(self._placeholder_page("Mod manager", "Modrinth and CurseForge integration is planned. No fake download controls are shown."))
+        self.pages.addWidget(self._modrinth_page())
         self.pages.addWidget(self._accounts_page())
         self.pages.addWidget(self._settings_page())
         self.pages.addWidget(self._console_page())
@@ -678,6 +724,153 @@ class MainWindow(QMainWindow):
         layout.addWidget(panel)
         layout.addStretch()
         return page
+
+    def _modrinth_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        heading = QLabel("Modrinth mod browser")
+        heading.setObjectName("Heading")
+        layout.addWidget(heading)
+        note = QLabel(
+            "Search real Modrinth projects and install checksum-verified JAR files into the selected instance."
+        )
+        note.setObjectName("Muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        controls = QHBoxLayout()
+        self.modrinth_search = QLineEdit()
+        self.modrinth_search.setPlaceholderText("Search mods, e.g. Sodium")
+        self.modrinth_game_version = QLineEdit()
+        self.modrinth_game_version.setPlaceholderText("Minecraft version, e.g. 1.21.4")
+        self.modrinth_game_version.setText(
+            self.selected_version if __import__("re").fullmatch(
+                r"\d+\.\d+(?:\.\d+)?", str(self.selected_version)
+            ) else ""
+        )
+        self.modrinth_loader = QComboBox()
+        self.modrinth_loader.addItem("Fabric", "fabric")
+        self.modrinth_loader.addItem("Forge", "forge")
+        self.modrinth_loader.addItem("NeoForge", "neoforge")
+        self.modrinth_loader.addItem("Quilt", "quilt")
+        self.modrinth_search_button = QPushButton("Search Modrinth")
+        self.modrinth_search_button.clicked.connect(self.search_modrinth)
+        controls.addWidget(self.modrinth_search, 2)
+        controls.addWidget(self.modrinth_game_version)
+        controls.addWidget(self.modrinth_loader)
+        controls.addWidget(self.modrinth_search_button)
+        layout.addLayout(controls)
+
+        self.modrinth_table = QTableWidget(0, 3)
+        self.modrinth_table.setHorizontalHeaderLabels(["Project", "Downloads", "Description"])
+        self.modrinth_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.modrinth_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.modrinth_table.horizontalHeader().setStretchLastSection(True)
+        self.modrinth_table.setColumnWidth(0, 220)
+        self.modrinth_table.setColumnWidth(1, 100)
+        layout.addWidget(self.modrinth_table, 1)
+
+        actions = QHBoxLayout()
+        self.modrinth_status = QLabel("Choose a Minecraft version and loader, then search.")
+        self.modrinth_status.setObjectName("Muted")
+        self.modrinth_status.setWordWrap(True)
+        self.modrinth_install_button = QPushButton("Install selected mod")
+        self.modrinth_install_button.setEnabled(False)
+        self.modrinth_install_button.clicked.connect(self.install_selected_modrinth)
+        actions.addWidget(self.modrinth_status, 1)
+        actions.addWidget(self.modrinth_install_button)
+        layout.addLayout(actions)
+
+        warning = QLabel(
+            "Note: this downloads mods only. The matching Fabric/Forge/NeoForge/Quilt loader "
+            "must be installed in the instance before these mods can load. Loader installation is a separate step."
+        )
+        warning.setObjectName("Muted")
+        warning.setWordWrap(True)
+        layout.addWidget(warning)
+        return page
+
+    def search_modrinth(self):
+        if self.modrinth_search_worker and self.modrinth_search_worker.isRunning():
+            return
+        game_version = self.modrinth_game_version.text().strip()
+        query = self.modrinth_search.text().strip()
+        loader = self.modrinth_loader.currentData()
+        self.modrinth_search_button.setEnabled(False)
+        self.modrinth_install_button.setEnabled(False)
+        self.modrinth_status.setText("Searching Modrinth...")
+        self.modrinth_search_worker = ModrinthSearchWorker(query, game_version, loader, self)
+        self.modrinth_search_worker.loaded.connect(self._modrinth_search_loaded)
+        self.modrinth_search_worker.failed.connect(self._modrinth_search_failed)
+        self.modrinth_search_worker.finished.connect(self._modrinth_search_finished)
+        self.modrinth_search_worker.start()
+        self.log(f"Searching Modrinth mods: {query or 'popular'} / Minecraft {game_version} / {loader}.")
+
+    def _modrinth_search_loaded(self, projects):
+        self.modrinth_projects = projects
+        self.modrinth_table.setRowCount(len(projects))
+        for row, project in enumerate(projects):
+            title = QTableWidgetItem(project["title"])
+            title.setData(Qt.ItemDataRole.UserRole, project["project_id"])
+            self.modrinth_table.setItem(row, 0, title)
+            self.modrinth_table.setItem(row, 1, QTableWidgetItem(f"{project['downloads']:,}"))
+            self.modrinth_table.setItem(row, 2, QTableWidgetItem(project["description"]))
+        self.modrinth_table.resizeRowsToContents()
+        self.modrinth_status.setText(
+            f"Found {len(projects)} compatible Modrinth project(s). Select one to install."
+        )
+        self.modrinth_install_button.setEnabled(bool(projects))
+        self.log(f"Modrinth search returned {len(projects)} compatible projects.")
+
+    def _modrinth_search_failed(self, error):
+        self.modrinth_status.setText(f"Modrinth search failed: {error}")
+        self.log(f"Modrinth search error: {error}")
+
+    def _modrinth_search_finished(self):
+        self.modrinth_search_button.setEnabled(True)
+        self.modrinth_search_worker = None
+
+    def install_selected_modrinth(self):
+        if self.modrinth_install_worker and self.modrinth_install_worker.isRunning():
+            return
+        row = self.modrinth_table.currentRow()
+        if row < 0 or row >= len(self.modrinth_projects):
+            self.modrinth_status.setText("Select a Modrinth project first.")
+            return
+        game_version = self.modrinth_game_version.text().strip()
+        project = self.modrinth_projects[row]
+        loader = self.modrinth_loader.currentData()
+        mods_directory = Path.home() / ".voidex" / "instances" / game_version / "mods"
+        self.modrinth_install_button.setEnabled(False)
+        self.modrinth_search_button.setEnabled(False)
+        self.modrinth_status.setText(f"Finding a compatible {loader} build of {project['title']}...")
+        self.modrinth_install_worker = ModrinthInstallWorker(
+            project, game_version, loader, mods_directory, self
+        )
+        self.modrinth_install_worker.progress.connect(self._modrinth_install_progress)
+        self.modrinth_install_worker.completed.connect(self._modrinth_install_completed)
+        self.modrinth_install_worker.failed.connect(self._modrinth_install_failed)
+        self.modrinth_install_worker.finished.connect(self._modrinth_install_finished)
+        self.modrinth_install_worker.start()
+        self.log(f"Installing Modrinth project {project['title']} into {mods_directory}.")
+
+    def _modrinth_install_progress(self, completed, total):
+        self.modrinth_status.setText(
+            f"Downloading mod: {completed / (1024 * 1024):.1f} / {total / (1024 * 1024):.1f} MiB"
+        )
+
+    def _modrinth_install_completed(self, path, version_name):
+        self.modrinth_status.setText(f"Installed and checksum-verified: {Path(path).name} ({version_name})")
+        self.log(f"Modrinth mod installed and verified: {path}")
+
+    def _modrinth_install_failed(self, error):
+        self.modrinth_status.setText(f"Mod install failed: {error}")
+        self.log(f"Modrinth install error: {error}")
+
+    def _modrinth_install_finished(self):
+        self.modrinth_install_button.setEnabled(bool(self.modrinth_projects))
+        self.modrinth_search_button.setEnabled(True)
+        self.modrinth_install_worker = None
 
     def _versions_page(self):
         page = QWidget()
