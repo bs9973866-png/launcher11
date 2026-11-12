@@ -21,6 +21,7 @@ A lightweight, customizable Minecraft Java launcher for Windows, built with Pyth
 - A tested launch-plan builder that checks Java compatibility, required library/client files, builds a platform-specific classpath without native classifier JARs, applies Mojang OS/feature rules, expands modern or legacy game arguments, and returns a shell-free argv/cwd plan. Account credentials must be explicitly supplied; the planner does not fabricate online sessions.
 - Low-end, Balanced and High-end starting presets, editable RAM allocation, rendering profile and JVM arguments.
 - Settings and the selected version are persisted with Qt settings.
+- Named instances have separate `resourcepacks` and `shaderpacks` folders. The Overview page opens the folders for the active instance; the default profile keeps using its version-scoped game folder, and symbolic-link redirection is rejected.
 - No permanent animation timers, polling loops, or background network requests. The Mojang manifest is requested only when the Versions page is opened or Refresh is pressed.
 
 ## Not implemented yet
