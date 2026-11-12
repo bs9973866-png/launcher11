@@ -1803,6 +1803,106 @@ def merge_fabric_profile_metadata(base_metadata, profile, libraries_root):
     return merged
 
 
+def merge_forge_profile_metadata(base_metadata, profile, libraries_root):
+    """Merge an installed Forge client profile and require every added library locally."""
+    if not isinstance(base_metadata, dict) or not isinstance(profile, dict):
+        raise ValueError("Invalid Minecraft or Forge profile metadata.")
+    base_id = base_metadata.get("id")
+    if not isinstance(base_id, str) or profile.get("inheritsFrom") != base_id:
+        raise ValueError("Forge profile does not inherit from the selected Minecraft version.")
+    profile_id = profile.get("id")
+    if (not isinstance(profile_id, str)
+            or not re.fullmatch(re.escape(base_id) + r"-forge-[A-Za-z0-9_.+-]+", profile_id)):
+        raise ValueError("Forge profile ID is invalid for the selected Minecraft version.")
+    main_class = profile.get("mainClass")
+    if not isinstance(main_class, str) or not main_class.strip():
+        raise ValueError("Forge profile has no client main class.")
+    libraries_root = Path(libraries_root).expanduser().resolve()
+    base_libraries = base_metadata.get("libraries", [])
+    profile_libraries = profile.get("libraries", [])
+    if not isinstance(base_libraries, list) or not isinstance(profile_libraries, list):
+        raise ValueError("Minecraft or Forge library metadata is invalid.")
+    merged = dict(base_metadata)
+    by_name = {}
+    for item in base_libraries:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ValueError("Minecraft profile contains an invalid library entry.")
+        by_name[item["name"]] = dict(item)
+    trusted_hosts = {
+        FORGE_MAVEN_HOST, "libraries.minecraft.net", "repo1.maven.org",
+        "repo.maven.apache.org", "maven.minecraftforge.net",
+    }
+    for raw in profile_libraries:
+        if not isinstance(raw, dict) or not isinstance(raw.get("name"), str):
+            raise ValueError("Forge profile contains an invalid library entry.")
+        item = dict(raw)
+        downloads = item.get("downloads")
+        artifact = downloads.get("artifact") if isinstance(downloads, dict) else None
+        if artifact is None:
+            coordinates = item["name"].split("@", 1)
+            coordinate = coordinates[0].split(":")
+            extension = coordinates[1] if len(coordinates) == 2 else "jar"
+            if len(coordinate) not in (3, 4) or not all(coordinate[:3]):
+                raise ValueError(f"Unsupported Forge Maven coordinate: {item['name']}")
+            group, artifact_name, version = coordinate[:3]
+            classifier = coordinate[3] if len(coordinate) == 4 else None
+            if (not re.fullmatch(r"[A-Za-z0-9_.-]+", group)
+                    or not re.fullmatch(r"[A-Za-z0-9_.-]+", artifact_name)
+                    or not re.fullmatch(r"[A-Za-z0-9_.+-]+", version)
+                    or not re.fullmatch(r"[A-Za-z0-9_.-]+", extension)
+                    or (classifier and not re.fullmatch(r"[A-Za-z0-9_.-]+", classifier))):
+                raise ValueError("Forge Maven coordinate contains unsafe characters.")
+            filename = f"{artifact_name}-{version}" + (f"-{classifier}" if classifier else "") + f".{extension}"
+            relative = Path(*group.split(".")) / artifact_name / version / filename
+            candidate = libraries_root / relative
+            current = candidate
+            while current != libraries_root:
+                if current.is_symlink():
+                    raise ValueError("Forge library path contains a symbolic link.")
+                current = current.parent
+            candidate = candidate.resolve()
+            try:
+                candidate.relative_to(libraries_root)
+            except ValueError as exc:
+                raise ValueError("Forge library path escapes the libraries directory.") from exc
+            if not candidate.is_file():
+                raise ValueError(f"Forge library is missing; reinstall the loader: {relative.as_posix()}")
+            repository = item.get("url") or f"https://{FORGE_MAVEN_HOST}/"
+            parsed = urlparse(repository)
+            if (parsed.scheme != "https" or parsed.hostname not in trusted_hosts
+                    or parsed.username is not None or parsed.password is not None):
+                raise ValueError("Forge library repository is not trusted.")
+            digest = hashlib.sha1()
+            with candidate.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
+                    digest.update(chunk)
+            item["downloads"] = {"artifact": {
+                "path": relative.as_posix(),
+                "url": repository.rstrip("/") + "/" + relative.as_posix(),
+                "sha1": digest.hexdigest(),
+                "size": candidate.stat().st_size,
+            }}
+        by_name[item["name"]] = item
+    merged["id"] = profile_id
+    merged["inheritsFrom"] = base_id
+    merged["mainClass"] = main_class
+    merged["libraries"] = list(by_name.values())
+    base_arguments = base_metadata.get("arguments")
+    profile_arguments = profile.get("arguments")
+    if isinstance(base_arguments, dict) or isinstance(profile_arguments, dict):
+        result = {}
+        for key in ("jvm", "game"):
+            base_values = (base_arguments or {}).get(key, []) if isinstance(base_arguments, dict) else []
+            profile_values = (profile_arguments or {}).get(key, []) if isinstance(profile_arguments, dict) else []
+            if not isinstance(base_values, list) or not isinstance(profile_values, list):
+                raise ValueError("Forge launch arguments are invalid.")
+            result[key] = list(base_values) + list(profile_values)
+        merged["arguments"] = result
+    elif isinstance(profile.get("minecraftArguments"), str):
+        merged["minecraftArguments"] = profile["minecraftArguments"]
+    return merged
+
+
 
 
 MAX_FORGE_INSTALLER_BYTES = 100 * 1024 * 1024
