@@ -462,9 +462,10 @@ class LaunchCheckWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, version_id, manifest_entry, java_executable, ram_mb,
-                 extra_jvm, account_source, nickname, parent=None):
+                 extra_jvm, account_source, nickname, fabric_profile_id=None, parent=None):
         super().__init__(parent)
         self.version_id = version_id
+        self.fabric_profile_id = fabric_profile_id
         self.manifest_entry = dict(manifest_entry)
         self.java_executable = java_executable
         self.ram_mb = ram_mb
@@ -492,6 +493,13 @@ class LaunchCheckWorker(QThread):
                 metadata = json.load(stream)
             if metadata.get("id") != self.version_id:
                 raise ValueError("Cached version JSON does not match the selected version.")
+            if self.fabric_profile_id:
+                profile_path = home / "versions" / self.fabric_profile_id / f"{self.fabric_profile_id}.json"
+                if profile_path.is_symlink() or not profile_path.is_file():
+                    raise ValueError("Installed Fabric profile is missing. Reinstall Fabric from the Mods page.")
+                with profile_path.open("r", encoding="utf-8") as stream:
+                    fabric_profile = json.load(stream)
+                metadata = merge_fabric_profile_metadata(metadata, fabric_profile, home / "libraries")
 
             client = home / "cache" / "clients" / f"{self.version_id}.jar"
             client_ref = (metadata.get("downloads") or {}).get("client") or {}
