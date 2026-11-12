@@ -313,7 +313,7 @@ class FullInstallWorker(QThread):
 
             self.stage.emit("Extracting native libraries")
             native_artifacts = [item for item in artifacts if item.get("source") == "native"]
-            native_paths = [path for path, item in zip(library_paths, artifacts) if item.get("source") == "native"]
+            native_paths = [libraries_root / item["path"] for item in native_artifacts]
             natives_root.mkdir(parents=True, exist_ok=True)
             extracted = extract_native_archives(native_paths, natives_root) if native_paths else []
             if not any(natives_root.iterdir()):
