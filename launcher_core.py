@@ -6,6 +6,7 @@ handling can be tested independently.
 """
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import os
@@ -15,6 +16,7 @@ import subprocess
 import tempfile
 import urllib.request
 from pathlib import Path, PurePosixPath
+from datetime import datetime
 import stat
 import zipfile
 import xml.etree.ElementTree as ET
@@ -22,6 +24,93 @@ from urllib.parse import urlencode, urlparse, quote
 
 MANIFEST_HOST = "piston-meta.mojang.com"
 _SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+class ProcessOutputBuffer:
+    """Decode arbitrary process byte chunks into complete UTF-8 lines."""
+
+    def __init__(self):
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._pending = ""
+
+    def feed(self, chunk: bytes, final: bool = False) -> list[str]:
+        if not isinstance(chunk, (bytes, bytearray, memoryview)):
+            raise TypeError("Process output chunks must be bytes.")
+        self._pending += self._decoder.decode(bytes(chunk), final=final)
+        lines = []
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            lines.append(line[:-1] if line.endswith("\r") else line)
+        if final:
+            if self._pending:
+                lines.append(self._pending[:-1] if self._pending.endswith("\r") else self._pending)
+            self._pending = ""
+        return lines
+
+
+class SessionLogWriter:
+    """Create an exclusive, bounded UTF-8 log file for one Minecraft session."""
+
+    def __init__(self, logs_directory, version_id: str, started_at: str | None = None,
+                 max_bytes: int = 16 * 1024 * 1024):
+        if (not isinstance(version_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", version_id)):
+            raise ValueError("Minecraft version ID is not safe for a session log filename.")
+        if (not isinstance(max_bytes, int) or isinstance(max_bytes, bool)
+                or max_bytes < 256):
+            raise ValueError("Session log size limit must be an integer of at least 256 bytes.")
+
+        root = Path(logs_directory).expanduser()
+        root.mkdir(parents=True, exist_ok=True)
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError("Session log directory is not a safe directory.")
+
+        stamp = started_at or datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
+        if not isinstance(stamp, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", stamp):
+            raise ValueError("Session log timestamp is invalid.")
+
+        self.path = root / f"{stamp}-{version_id}.log"
+        if self.path.is_symlink():
+            raise ValueError("Refusing to open a symbolic-link session log.")
+        self._stream = self.path.open("x", encoding="utf-8", newline="\n")
+        self._max_bytes = max_bytes
+        self._bytes_written = 0
+        self._truncated = False
+        self._closed = False
+
+    def write(self, message: str):
+        if self._closed:
+            raise ValueError("Session log is already closed.")
+        if not isinstance(message, str):
+            message = str(message)
+        message = message.replace("\x00", "\\0")
+        lines = message.splitlines() or [""]
+        timestamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        for line in lines:
+            record = f"[{timestamp}] {line}\n"
+            record_size = len(record.encode("utf-8"))
+            if self._bytes_written + record_size > self._max_bytes:
+                if not self._truncated:
+                    marker = (
+                        f"[{timestamp}] [VOIDEX] Session log size limit reached; "
+                        "further output omitted.\n"
+                    )
+                    marker_size = len(marker.encode("utf-8"))
+                    if self._bytes_written + marker_size <= self._max_bytes:
+                        self._stream.write(marker)
+                        self._bytes_written += marker_size
+                self._truncated = True
+                break
+            self._stream.write(record)
+            self._bytes_written += record_size
+        self._stream.flush()
+
+    def close(self):
+        if not self._closed:
+            self._stream.close()
+            self._closed = True
+
+
 
 
 def fetch_version_metadata(metadata_url: str, timeout: int = 20) -> dict:
