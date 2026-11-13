@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 import subprocess
 import urllib.request
 
-from launcher_core import (download_verified_client, download_verified_library, download_verified_libraries, download_verified_version_json,
+from launcher_core import (ProcessOutputBuffer, SessionLogWriter, download_verified_client, download_verified_library, download_verified_libraries, download_verified_version_json,
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata,
                            extract_native_archives, discover_java_candidates, validate_java_executable,
                            build_minecraft_classpath, build_launch_plan,
@@ -1663,6 +1663,78 @@ class InstalledModManagementTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "symbolic-link"):
                 remove_installed_mod(root, "linked.jar")
             self.assertEqual(outside.read_bytes(), b"outside")
+
+
+class ProcessOutputBufferTests(unittest.TestCase):
+    def test_split_utf8_and_partial_lines_are_preserved(self):
+        buffer = ProcessOutputBuffer()
+        payload = "Привет\nследующая строка".encode("utf-8")
+        self.assertEqual(buffer.feed(payload[:1]), [])
+        self.assertEqual(buffer.feed(payload[1:13]), ["Привет"])
+        self.assertEqual(buffer.feed(payload[13:], final=True), ["следующая строка"])
+
+    def test_crlf_and_final_partial_line(self):
+        buffer = ProcessOutputBuffer()
+        self.assertEqual(buffer.feed(b"first\\r"), [])
+        self.assertEqual(buffer.feed(b"\\nsecond\\npartial"), ["first", "second"])
+        self.assertEqual(buffer.feed(b"", final=True), ["partial"])
+
+    def test_invalid_utf8_is_replaced_without_crashing(self):
+        buffer = ProcessOutputBuffer()
+        self.assertEqual(buffer.feed(b"bad\\xff\\n", final=True), ["bad�"])
+
+
+class SessionLogWriterTests(unittest.TestCase):
+    def test_session_log_is_created_and_written_as_utf8(self):
+        with tempfile.TemporaryDirectory() as directory:
+            writer = SessionLogWriter(
+                directory, "1.21.11", started_at="20261113-164700"
+            )
+            writer.write("Minecraft process started")
+            writer.write("[MC] Привет, мир")
+            path = writer.path
+            writer.close()
+            content = path.read_text(encoding="utf-8")
+            self.assertIn("Minecraft process started", content)
+            self.assertIn("[MC] Привет, мир", content)
+            self.assertTrue(path.name.endswith("-1.21.11.log"))
+            with self.assertRaisesRegex(ValueError, "already closed"):
+                writer.write("after close")
+
+    def test_existing_log_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = SessionLogWriter(
+                directory, "1.21.11", started_at="same-run"
+            )
+            first.write("preserve this")
+            first.close()
+            with self.assertRaises(FileExistsError):
+                SessionLogWriter(
+                    directory, "1.21.11", started_at="same-run"
+                )
+            self.assertIn(
+                "preserve this", (Path(directory) / "same-run-1.21.11.log").read_text(encoding="utf-8")
+            )
+
+    def test_unsafe_version_id_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "not safe"):
+                SessionLogWriter(directory, "../outside", started_at="run")
+
+    def test_session_log_has_a_size_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            writer = SessionLogWriter(
+                directory, "1.21.11", started_at="bounded", max_bytes=450
+            )
+            writer.write("a" * 50)
+            writer.write("b" * 350)
+            writer.write("this line must not be recorded")
+            path = writer.path
+            writer.close()
+            content = path.read_text(encoding="utf-8")
+            self.assertLessEqual(path.stat().st_size, 450)
+            self.assertIn("Session log size limit reached", content)
+            self.assertNotIn("this line must not be recorded", content)
 
 
 class LaunchPlanTests(unittest.TestCase):
