@@ -81,6 +81,8 @@ class SessionLogWriter:
     def write(self, message: str):
         if self._closed:
             raise ValueError("Session log is already closed.")
+        if self._truncated:
+            return
         if not isinstance(message, str):
             message = str(message)
         message = message.replace("\x00", "\\0")
