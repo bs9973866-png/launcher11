@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from launcher_core import (fetch_version_metadata, summarize_version_metadata, download_verified_client,
+from launcher_core import (ProcessOutputBuffer, SessionLogWriter, fetch_version_metadata, summarize_version_metadata, download_verified_client,
                             download_verified_version_json, resolve_library_artifacts,
                             download_verified_libraries, resolve_asset_objects, extract_native_archives,
                             discover_java_candidates, validate_java_executable,
@@ -882,6 +882,9 @@ class MainWindow(QMainWindow):
         self.java_worker = None
         self.launch_worker = None
         self.minecraft_process = None
+        self.session_log = None
+        self.stdout_buffer = None
+        self.stderr_buffer = None
         self.fabric_versions_worker = None
         self.forge_versions_worker = None
         self.forge_install_worker = None
@@ -2887,6 +2890,16 @@ class MainWindow(QMainWindow):
         self.launch_button.setEnabled(True)
 
     def _launch_plan_ready(self, plan):
+        self.stdout_buffer = ProcessOutputBuffer()
+        self.stderr_buffer = ProcessOutputBuffer()
+        try:
+            self.session_log = SessionLogWriter(
+                Path.home() / ".voidex" / "logs", self.selected_version
+            )
+            self.log(f"Persistent Minecraft session log: {self.session_log.path}")
+        except Exception as exc:
+            self.session_log = None
+            self.log(f"Persistent session log unavailable; console output remains active: {exc}")
         self.log("All required files passed preflight checks. Starting Java process.")
         self.launch_status.setText("Starting Minecraft...")
         process = QProcess(self)
@@ -2909,18 +2922,42 @@ class MainWindow(QMainWindow):
         self.log("Minecraft Java process started.")
 
     def _minecraft_stdout(self):
-        if not self.minecraft_process:
+        if not self.minecraft_process or self.stdout_buffer is None:
             return
-        data = bytes(self.minecraft_process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        for line in data.splitlines():
+        data = bytes(self.minecraft_process.readAllStandardOutput())
+        for line in self.stdout_buffer.feed(data):
             self.log(f"[MC] {line}")
 
     def _minecraft_stderr(self):
-        if not self.minecraft_process:
+        if not self.minecraft_process or self.stderr_buffer is None:
             return
-        data = bytes(self.minecraft_process.readAllStandardError()).decode("utf-8", errors="replace")
-        for line in data.splitlines():
+        data = bytes(self.minecraft_process.readAllStandardError())
+        for line in self.stderr_buffer.feed(data):
             self.log(f"[MC:ERR] {line}")
+
+    def _flush_minecraft_output(self):
+        for attribute, prefix in (
+            ("stdout_buffer", "[MC] "),
+            ("stderr_buffer", "[MC:ERR] "),
+        ):
+            buffer = getattr(self, attribute, None)
+            if buffer is None:
+                continue
+            for line in buffer.feed(b"", final=True):
+                self.log(prefix + line)
+            setattr(self, attribute, None)
+
+    def _close_session_log(self):
+        writer = self.session_log
+        self.session_log = None
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception as exc:
+                if hasattr(self, "console"):
+                    self.console.appendPlainText(
+                        f"[VOIDEX] Could not close session log cleanly: {exc}"
+                    )
 
     def _minecraft_process_error(self, error):
         if not self.minecraft_process:
@@ -2930,14 +2967,19 @@ class MainWindow(QMainWindow):
         if self.minecraft_process.state() == QProcess.ProcessState.NotRunning:
             self.stop_button.setEnabled(False)
             self.launch_button.setEnabled(True)
+            if error == QProcess.ProcessError.FailedToStart:
+                self._flush_minecraft_output()
+                self._close_session_log()
 
     def _minecraft_process_finished(self, exit_code, exit_status):
         self._minecraft_stdout()
         self._minecraft_stderr()
+        self._flush_minecraft_output()
         self.stop_button.setEnabled(False)
         self.launch_button.setEnabled(True)
         self.launch_status.setText(f"Minecraft exited with code {exit_code}.")
         self.log(f"Minecraft process finished: exit code {exit_code}, status {exit_status}.")
+        self._close_session_log()
         self.minecraft_process = None
 
     def stop_minecraft(self):
@@ -3002,6 +3044,20 @@ class MainWindow(QMainWindow):
     def log(self, message):
         if hasattr(self, "console"):
             self.console.appendPlainText(f"[VOIDEX] {message}")
+        if self.session_log is not None:
+            try:
+                self.session_log.write(str(message))
+            except Exception as exc:
+                writer = self.session_log
+                self.session_log = None
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                if hasattr(self, "console"):
+                    self.console.appendPlainText(
+                        f"[VOIDEX] Persistent session logging disabled: {exc}"
+                    )
 
 
 def main():
