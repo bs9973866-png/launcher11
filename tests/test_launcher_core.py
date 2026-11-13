@@ -1675,13 +1675,13 @@ class ProcessOutputBufferTests(unittest.TestCase):
 
     def test_crlf_and_final_partial_line(self):
         buffer = ProcessOutputBuffer()
-        self.assertEqual(buffer.feed(b"first\\r"), [])
-        self.assertEqual(buffer.feed(b"\\nsecond\\npartial"), ["first", "second"])
+        self.assertEqual(buffer.feed(b"first\r"), [])
+        self.assertEqual(buffer.feed(b"\nsecond\npartial"), ["first", "second"])
         self.assertEqual(buffer.feed(b"", final=True), ["partial"])
 
     def test_invalid_utf8_is_replaced_without_crashing(self):
         buffer = ProcessOutputBuffer()
-        self.assertEqual(buffer.feed(b"bad\\xff\\n", final=True), ["bad�"])
+        self.assertEqual(buffer.feed(b"bad\xff\n", final=True), ["bad�"])
 
 
 class SessionLogWriterTests(unittest.TestCase):
