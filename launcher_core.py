@@ -278,23 +278,7 @@ def download_verified_version_json(metadata_url, expected_sha1, destination,
     target.parent.mkdir(parents=True, exist_ok=True)
 
     def validate_file(path):
-        digest = hashlib.sha1()
-        size = 0
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
-                size += len(chunk)
-                digest.update(chunk)
-                if size > MAX_VERSION_JSON_BYTES:
-                    raise ValueError("Version JSON exceeds the maximum allowed size.")
-        if digest.hexdigest() != expected_sha1.lower():
-            raise ValueError("Version JSON SHA-1 verification failed.")
-        try:
-            document = json.loads(path.read_text(encoding="utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("Downloaded version metadata is not valid UTF-8 JSON.") from exc
-        if not isinstance(document, dict):
-            raise ValueError("Version metadata must be a JSON object.")
-        return document
+        return verify_cached_version_json(path, expected_sha1)
 
     if target.is_file():
         try:
@@ -350,6 +334,36 @@ def download_verified_version_json(metadata_url, expected_sha1, destination,
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+
+def verify_cached_version_json(version_json_path, expected_sha1, expected_version_id=None):
+    """Verify a cached Mojang version document against its manifest SHA-1 and ID."""
+    if not isinstance(expected_sha1, str) or not _SHA1_RE.fullmatch(expected_sha1):
+        raise ValueError("Invalid expected version JSON SHA-1 checksum.")
+    path = Path(version_json_path).expanduser()
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Cached version JSON is missing or unsafe.")
+    if path.stat().st_size > MAX_VERSION_JSON_BYTES:
+        raise ValueError("Cached version JSON exceeds the maximum allowed size.")
+
+    digest = hashlib.sha1()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != expected_sha1.lower():
+        raise ValueError("Cached version JSON SHA-1 mismatch; install the version again.")
+
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Cached version metadata is not valid UTF-8 JSON.") from exc
+    if not isinstance(document, dict):
+        raise ValueError("Cached version metadata must be a JSON object.")
+    if expected_version_id is not None:
+        if not isinstance(expected_version_id, str) or document.get("id") != expected_version_id:
+            raise ValueError("Cached version metadata ID does not match the selected version.")
+    return document
 
 
 _LIBRARY_OS_NAMES = {"windows", "linux", "osx"}
