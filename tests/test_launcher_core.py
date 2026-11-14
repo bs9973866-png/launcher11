@@ -15,7 +15,7 @@ from launcher_core import (ProcessOutputBuffer, SessionLogWriter, download_verif
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata,
                            extract_native_archives, discover_java_candidates, validate_java_executable,
                            build_minecraft_classpath, build_launch_plan,
-                           verify_cached_asset_objects, safe_extract_temurin_zip,
+                           verify_cached_asset_objects, verify_cached_version_json, safe_extract_temurin_zip,
                            _fetch_temurin_asset, install_temurin_runtime,
                            search_modrinth_mods, fetch_modrinth_compatible_version,
                            download_verified_modrinth_file, list_installed_mods,
@@ -213,6 +213,67 @@ class VersionJsonCacheTests(unittest.TestCase):
                 )
             self.assertEqual(target.read_bytes(), b"previous")
             self.assertEqual(list(Path(directory).glob("*.part")), [])
+
+
+
+class CachedVersionJsonVerificationTests(unittest.TestCase):
+    def setUp(self):
+        self.payload = b'{"id":"1.21.4","libraries":[]}'
+        self.sha1 = hashlib.sha1(self.payload).hexdigest()
+
+    def test_verifies_cached_document_checksum_and_version_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "1.21.4.json"
+            target.write_bytes(self.payload)
+            result = verify_cached_version_json(target, self.sha1, "1.21.4")
+            self.assertEqual(result["id"], "1.21.4")
+
+    def test_rejects_tampered_cached_document(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "1.21.4.json"
+            target.write_bytes(self.payload + b" ")
+            with self.assertRaisesRegex(ValueError, "SHA-1 mismatch"):
+                verify_cached_version_json(target, self.sha1, "1.21.4")
+
+    def test_rejects_cached_document_for_another_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "1.21.4.json"
+            target.write_bytes(self.payload)
+            with self.assertRaisesRegex(ValueError, "ID does not match"):
+                verify_cached_version_json(target, self.sha1, "1.20.4")
+
+    def test_rejects_symbolic_link_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside.json"
+            outside.write_bytes(self.payload)
+            target = root / "cached.json"
+            try:
+                target.symlink_to(outside)
+            except (OSError, NotImplementedError):
+                self.skipTest("Symlinks are unavailable on this runner.")
+            with self.assertRaisesRegex(ValueError, "missing or unsafe"):
+                verify_cached_version_json(target, self.sha1)
+
+    def test_download_replaces_a_symlink_instead_of_reusing_its_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside.json"
+            outside.write_bytes(self.payload)
+            target = root / "cached.json"
+            try:
+                target.symlink_to(outside)
+            except (OSError, NotImplementedError):
+                self.skipTest("Symlinks are unavailable on this runner.")
+            opener = Mock()
+            opener.open.return_value = FakeResponse(self.payload)
+            download_verified_version_json(
+                "https://piston-meta.mojang.com/v1/packages/example/version.json",
+                self.sha1, target, opener=opener,
+            )
+            opener.open.assert_called_once()
+            self.assertFalse(target.is_symlink())
+            self.assertEqual(target.read_bytes(), self.payload)
 
 
 class LibraryResolutionTests(unittest.TestCase):
