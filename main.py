@@ -13,7 +13,7 @@ from launcher_core import (ProcessOutputBuffer, SessionLogWriter, fetch_version_
                             download_verified_version_json, resolve_library_artifacts,
                             download_verified_libraries, resolve_asset_objects, extract_native_archives,
                             discover_java_candidates, validate_java_executable,
-                            build_launch_plan, verify_cached_asset_objects,
+                            build_launch_plan, verify_cached_asset_objects, verify_cached_version_json,
                             install_temurin_runtime, search_modrinth_mods,
                             fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod,
                             fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata,
@@ -713,10 +713,9 @@ class LaunchCheckWorker(QThread):
             version_json = home / "cache" / "versions" / self.version_id / f"{self.version_id}.json"
             if version_json.is_symlink() or not version_json.is_file():
                 raise ValueError("Version JSON is not cached. Use Cache version JSON first.")
-            with version_json.open("r", encoding="utf-8") as stream:
-                metadata = json.load(stream)
-            if metadata.get("id") != self.version_id:
-                raise ValueError("Cached version JSON does not match the selected version.")
+            metadata = verify_cached_version_json(
+                version_json, self.manifest_entry.get("sha1"), self.version_id
+            )
             if self.instance_profile_id:
                 selected_instance = resolve_instance_profile(
                     home / "profiles", self.instance_profile_id, self.version_id
@@ -802,6 +801,8 @@ class LaunchCheckWorker(QThread):
                 )
             asset_index_path = home / "assets" / "indexes" / f"{asset_ref['id']}.json"
             objects_root = home / "assets" / "objects"
+            if asset_index_path.is_symlink() or not asset_index_path.is_file():
+                raise ValueError("Asset index is missing or unsafe; install assets again.")
             if asset_ref.get("sha1"):
                 index_digest = hashlib.sha1()
                 with asset_index_path.open("rb") as stream:
