@@ -11,7 +11,7 @@ from pathlib import Path
 
 from launcher_core import (ProcessOutputBuffer, SessionLogWriter, fetch_version_metadata, summarize_version_metadata, download_verified_client,
                             download_verified_version_json, resolve_library_artifacts,
-                            download_verified_libraries, resolve_asset_objects, extract_native_archives,
+                            download_verified_libraries, resolve_asset_objects, materialize_asset_index, extract_native_archives,
                             discover_java_candidates, validate_java_executable,
                             build_launch_plan, verify_cached_asset_objects, verify_cached_version_json,
                             install_temurin_runtime, search_modrinth_mods,
@@ -559,11 +559,6 @@ class FullInstallWorker(QThread):
             asset_ref = metadata.get("assetIndex")
             if not isinstance(asset_ref, dict) or not asset_ref.get("id"):
                 raise ValueError("This Minecraft version has no supported asset index.")
-            if asset_ref.get("virtual") or metadata.get("assets") == "legacy":
-                raise ValueError(
-                    "This older version requires virtual/legacy asset materialization, which is not supported yet."
-                )
-
             self.stage.emit("Downloading and verifying Minecraft client")
             summary = summarize_version_metadata(metadata)
             client = download_verified_client(
@@ -607,6 +602,10 @@ class FullInstallWorker(QThread):
             verification = verify_cached_asset_objects(cached_index, assets_root / "objects")
 
             game_root.mkdir(parents=True, exist_ok=True)
+            asset_materialization = materialize_asset_index(
+                asset_index, assets_root / "objects", assets_root, game_root,
+                index_id, metadata.get("assets"),
+            )
             self.completed.emit({
                 "version": version_id,
                 "client": str(client),
@@ -615,6 +614,7 @@ class FullInstallWorker(QThread):
                 "native_files": len(extracted),
                 "assets": len(asset_paths),
                 "verified_assets": verification["count"],
+                "asset_layout": asset_materialization,
                 "game_directory": str(game_root),
                 "natives_directory": str(natives_root),
             })
@@ -794,11 +794,6 @@ class LaunchCheckWorker(QThread):
             asset_ref = metadata.get("assetIndex") or {}
             if not isinstance(asset_ref, dict) or not asset_ref.get("id"):
                 raise ValueError("This version has no supported asset index.")
-            if asset_ref.get("virtual") or metadata.get("assets") == "legacy":
-                raise ValueError(
-                    "This older version requires virtual/legacy asset materialization, "
-                    "which is not implemented yet. Launch is blocked to avoid missing game resources."
-                )
             asset_index_path = home / "assets" / "indexes" / f"{asset_ref['id']}.json"
             objects_root = home / "assets" / "objects"
             if asset_index_path.is_symlink() or not asset_index_path.is_file():
@@ -810,7 +805,7 @@ class LaunchCheckWorker(QThread):
                         index_digest.update(chunk)
                 if index_digest.hexdigest().lower() != asset_ref["sha1"].lower():
                     raise ValueError("Asset index SHA-1 mismatch; install assets again.")
-            verify_cached_asset_objects(asset_index_path, objects_root)
+            asset_verification = verify_cached_asset_objects(asset_index_path, objects_root)
 
             expected_java = (metadata.get("javaVersion") or {}).get("majorVersion")
             java_candidates = [Path(self.java_executable)] if self.java_executable else discover_java_candidates()
@@ -840,6 +835,10 @@ class LaunchCheckWorker(QThread):
             else:
                 game_directory = home / "instances" / self.version_id
             game_directory.mkdir(parents=True, exist_ok=True)
+            asset_materialization = materialize_asset_index(
+                asset_verification["index"], objects_root, home / "assets",
+                game_directory, asset_ref["id"], metadata.get("assets"),
+            )
             auth = {
                 "player_name": self.nickname,
                 "uuid": offline_uuid(self.nickname),
@@ -857,6 +856,7 @@ class LaunchCheckWorker(QThread):
                 natives_directory=natives,
                 game_directory=game_directory,
                 assets_root=home / "assets",
+                game_assets_directory=asset_materialization["game_assets_directory"],
                 auth=auth,
                 jvm_arguments=[f"-Xms512M", f"-Xmx{self.ram_mb}M", *self.extra_jvm],
                 version_type=self.manifest_entry.get("type", "release"),
