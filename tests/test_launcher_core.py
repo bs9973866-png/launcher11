@@ -573,7 +573,7 @@ class AssetMaterializationTests(unittest.TestCase):
         target = self.assets / "virtual" / "1.7.10" / "sounds" / "test.ogg"
         self.assertEqual(target.read_bytes(), b"sound-data")
         self.assertEqual(result["mode"], "virtual")
-        self.assertEqual(Path(result["game_assets_directory"]), target.parents[1])
+        self.assertEqual(Path(result["game_assets_directory"]), target.parents[1].resolve())
 
     def test_legacy_metadata_uses_the_legacy_virtual_directory(self):
         index, _, _ = self._asset_index("newsound/random/click.ogg")
@@ -584,7 +584,7 @@ class AssetMaterializationTests(unittest.TestCase):
         target = self.assets / "virtual" / "legacy" / "newsound" / "random" / "click.ogg"
         self.assertEqual(target.read_bytes(), b"sound-data")
         self.assertEqual(result["mode"], "virtual")
-        self.assertEqual(Path(result["game_assets_directory"]), self.assets / "virtual" / "legacy")
+        self.assertEqual(Path(result["game_assets_directory"]), (self.assets / "virtual" / "legacy").resolve())
 
     def test_map_to_resources_is_reconstructed_inside_game_directory(self):
         index, _, _ = self._asset_index("sound/step/grass1.ogg")
@@ -595,7 +595,7 @@ class AssetMaterializationTests(unittest.TestCase):
         target = self.game / "resources" / "sound" / "step" / "grass1.ogg"
         self.assertEqual(target.read_bytes(), b"sound-data")
         self.assertEqual(result["mode"], "resources")
-        self.assertEqual(Path(result["game_assets_directory"]), self.game / "resources")
+        self.assertEqual(Path(result["game_assets_directory"]), (self.game / "resources").resolve())
 
     def test_modern_index_does_not_duplicate_content_addressed_objects(self):
         index, object_path, _ = self._asset_index()
