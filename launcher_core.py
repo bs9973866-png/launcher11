@@ -673,6 +673,213 @@ def resolve_asset_objects(asset_index):
     return [resolved[path] for path in sorted(resolved)]
 
 
+_ASSET_INDEX_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_WINDOWS_RESERVED_ASSET_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def _validated_asset_logical_parts(logical_name):
+    """Validate an asset-index key before using it as a filesystem path."""
+    if (not isinstance(logical_name, str) or not logical_name
+            or len(logical_name) > 1024 or "\\" in logical_name
+            or "\x00" in logical_name or logical_name.startswith("/")):
+        raise ValueError("Asset index contains an unsafe logical asset path.")
+    parts = logical_name.split("/")
+    if any(not part or part in {".", ".."} or len(part) > 255
+           or any(char in '<>:"|?*' for char in part)
+           or part.endswith((".", " "))
+           or part.split(".", 1)[0].upper() in _WINDOWS_RESERVED_ASSET_NAMES
+           for part in parts):
+        raise ValueError("Asset index contains an unsafe logical asset path.")
+    return parts
+
+
+def _ensure_asset_directory(base_directory, target_directory):
+    """Create a directory below a trusted root without following symlink components."""
+    base = Path(base_directory).expanduser().absolute()
+    target = Path(target_directory).expanduser().absolute()
+    if base.is_symlink():
+        raise ValueError("Asset materialization refuses a symbolic-link root.")
+    base.mkdir(parents=True, exist_ok=True)
+    try:
+        relative = target.relative_to(base)
+    except ValueError as exc:
+        raise ValueError("Asset materialization target escapes its root.") from exc
+
+    current = base
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("Asset materialization refuses symbolic-link directories.")
+        if current.exists() and not current.is_dir():
+            raise ValueError("Asset materialization path contains a non-directory.")
+        current.mkdir(exist_ok=True)
+    resolved = current.resolve()
+    try:
+        resolved.relative_to(base.resolve())
+    except ValueError as exc:
+        raise ValueError("Asset materialization target escapes its root.") from exc
+    return resolved
+
+
+def _asset_file_matches(path, expected_size, expected_sha1):
+    try:
+        candidate = Path(path)
+        if candidate.is_symlink() or not candidate.is_file():
+            return False
+        if candidate.stat().st_size != expected_size:
+            return False
+        digest = hashlib.sha1()
+        with candidate.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == expected_sha1
+    except OSError:
+        return False
+
+
+def materialize_asset_index(asset_index, objects_root, assets_root,
+                            game_directory, asset_index_id,
+                            metadata_assets=None):
+    """Reconstruct virtual or pre-1.6 assets from verified content-addressed objects.
+
+    Modern indexes remain in assets/objects and need no copy. Indexes with
+    virtual=true are reconstructed under assets/virtual/<index-id>;
+    map_to_resources=true indexes are reconstructed under the instance's
+    resources directory. The legacy metadata marker uses assets/virtual/legacy.
+    """
+    if not isinstance(asset_index, dict):
+        raise ValueError("Minecraft asset index must be a JSON object.")
+    objects = asset_index.get("objects")
+    if not isinstance(objects, dict):
+        raise ValueError("Minecraft asset index has no valid objects map.")
+    virtual = asset_index.get("virtual", False)
+    map_to_resources = asset_index.get("map_to_resources", False)
+    if not isinstance(virtual, bool) or not isinstance(map_to_resources, bool):
+        raise ValueError("Minecraft asset index contains invalid legacy mapping flags.")
+
+    assets_base = Path(assets_root).expanduser().absolute()
+    game_base = Path(game_directory).expanduser().absolute()
+    if map_to_resources:
+        mode = "resources"
+        target_root = _ensure_asset_directory(game_base, game_base / "resources")
+    elif virtual or metadata_assets == "legacy":
+        if metadata_assets == "legacy":
+            virtual_id = "legacy"
+        else:
+            if not isinstance(asset_index_id, str) or not _ASSET_INDEX_ID_RE.fullmatch(asset_index_id):
+                raise ValueError("Minecraft virtual asset index ID is invalid.")
+            virtual_id = asset_index_id
+        mode = "virtual"
+        target_root = _ensure_asset_directory(
+            assets_base, assets_base / "virtual" / virtual_id
+        )
+    else:
+        legacy_assets_directory = assets_base / "virtual" / "legacy"
+        return {
+            "mode": "objects",
+            "directory": str(legacy_assets_directory),
+            "game_assets_directory": str(legacy_assets_directory),
+            "count": 0,
+            "copied": 0,
+            "reused": 0,
+        }
+
+    source_root = Path(objects_root).expanduser().absolute()
+    if source_root.is_symlink() or not source_root.is_dir():
+        raise ValueError("Minecraft asset object cache is missing or unsafe.")
+    source_root_resolved = source_root.resolve()
+    copied = 0
+    reused = 0
+
+    for logical_name, metadata in objects.items():
+        parts = _validated_asset_logical_parts(logical_name)
+        if not isinstance(metadata, dict):
+            raise ValueError("Asset index contains invalid object metadata.")
+        digest = metadata.get("hash")
+        size = metadata.get("size")
+        if (not isinstance(digest, str) or not _SHA1_RE.fullmatch(digest)
+                or not isinstance(size, int) or isinstance(size, bool) or size <= 0):
+            raise ValueError("Asset index contains invalid object hash or size.")
+        digest = digest.lower()
+
+        destination = target_root.joinpath(*parts)
+        parent = target_root
+        for part in parts[:-1]:
+            parent = parent / part
+            if parent.is_symlink():
+                raise ValueError("Asset materialization refuses symbolic-link directories.")
+            if parent.exists() and not parent.is_dir():
+                raise ValueError("Asset materialization path contains a non-directory.")
+            parent.mkdir(exist_ok=True)
+            try:
+                parent.resolve().relative_to(target_root)
+            except ValueError as exc:
+                raise ValueError("Asset materialization path escapes its target.") from exc
+
+        if destination.is_symlink():
+            raise ValueError("Asset materialization refuses symbolic-link files.")
+        if destination.exists() and not destination.is_file():
+            raise ValueError("Asset materialization destination is not a regular file.")
+        if _asset_file_matches(destination, size, digest):
+            reused += 1
+            continue
+
+        source = source_root / digest[:2] / digest
+        if source.is_symlink() or source.parent.is_symlink():
+            raise ValueError("Asset object cache refuses symbolic-link paths.")
+        try:
+            source.resolve().relative_to(source_root_resolved)
+        except ValueError as exc:
+            raise ValueError("Asset object path escapes the cache.") from exc
+        if not source.is_file():
+            raise ValueError(f"Required Minecraft asset object is missing: {digest}")
+        if source.stat().st_size != size:
+            raise ValueError(f"Minecraft asset object size mismatch: {digest}")
+
+        temporary_path = None
+        try:
+            digest_check = hashlib.sha1()
+            copied_size = 0
+            with source.open("rb") as source_stream, tempfile.NamedTemporaryFile(
+                    mode="wb", prefix=f".{destination.name}.", suffix=".part",
+                    dir=str(destination.parent), delete=False) as target_stream:
+                temporary_path = Path(target_stream.name)
+                for chunk in iter(lambda: source_stream.read(256 * 1024), b""):
+                    copied_size += len(chunk)
+                    if copied_size > size:
+                        raise ValueError(f"Minecraft asset object exceeds its declared size: {digest}")
+                    digest_check.update(chunk)
+                    target_stream.write(chunk)
+                target_stream.flush()
+                os.fsync(target_stream.fileno())
+            if copied_size != size:
+                raise ValueError(f"Minecraft asset object is truncated: {digest}")
+            if digest_check.hexdigest() != digest:
+                raise ValueError(f"Minecraft asset object SHA-1 mismatch: {digest}")
+            os.replace(temporary_path, destination)
+            temporary_path = None
+            copied += 1
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    return {
+        "mode": mode,
+        "directory": str(target_root),
+        "game_assets_directory": str(target_root),
+        "count": len(objects),
+        "copied": copied,
+        "reused": reused,
+    }
+
+
 MAX_NATIVE_ARCHIVE_ENTRIES = 20000
 MAX_NATIVE_TOTAL_UNCOMPRESSED = 512 * 1024 * 1024
 MAX_NATIVE_FILE_SIZE = 128 * 1024 * 1024
@@ -1282,7 +1489,8 @@ def build_launch_plan(version_metadata, *, java_executable, client_jar,
                       assets_root, auth, java_validation=None, jvm_arguments=None,
                       resolution=(1280, 720), version_type="release",
                       launcher_name="VOIDEX", launcher_version="0.1",
-                      os_name=None, arch=None, features=None):
+                      os_name=None, arch=None, features=None,
+                       game_assets_directory=None):
     """Return a validated process argv/cwd plan; never executes Java.
 
     Auth must explicitly provide player_name, uuid, access_token and user_type.
@@ -1340,6 +1548,9 @@ def build_launch_plan(version_metadata, *, java_executable, client_jar,
         "game_directory": str(game_path),
         "assets_root": str(assets_path),
         "assets_index_name": str(asset_index_name),
+        "game_assets": str(Path(game_assets_directory).expanduser().resolve()
+                            if game_assets_directory is not None
+                            else assets_path / "virtual" / "legacy"),
         "auth_uuid": auth["uuid"].replace("-", ""),
         "auth_access_token": auth["access_token"],
         "user_type": auth["user_type"],
@@ -1399,6 +1610,7 @@ def build_launch_plan(version_metadata, *, java_executable, client_jar,
         "natives_directory": str(natives_path),
         "assets_root": str(assets_path),
         "assets_index_name": str(asset_index_name),
+        "game_assets_directory": placeholders["game_assets"],
     }
 
 
