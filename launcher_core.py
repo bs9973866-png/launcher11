@@ -1491,7 +1491,7 @@ def build_launch_plan(version_metadata, *, java_executable, client_jar,
                       resolution=(1280, 720), version_type="release",
                       launcher_name="VOIDEX", launcher_version="0.1",
                       os_name=None, arch=None, features=None,
-                       game_assets_directory=None):
+                      game_assets_directory=None):
     """Return a validated process argv/cwd plan; never executes Java.
 
     Auth must explicitly provide player_name, uuid, access_token and user_type.
