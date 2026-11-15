@@ -1,8 +1,7 @@
-"""Small, dependency-free helpers for Mojang version metadata.
+"""Dependency-light helpers for verified Minecraft installation and launch planning.
 
-This module deliberately resolves metadata only. It does not download game files or
-start a process; those steps will be added after their integrity and lifecycle
-handling can be tested independently.
+Network downloads, archive extraction, asset reconstruction, Java validation and
+argument planning live here; the PySide6 application owns the actual process lifecycle.
 """
 from __future__ import annotations
 
@@ -761,6 +760,18 @@ def materialize_asset_index(asset_index, objects_root, assets_root,
     if not isinstance(virtual, bool) or not isinstance(map_to_resources, bool):
         raise ValueError("Minecraft asset index contains invalid legacy mapping flags.")
 
+    prepared_objects = []
+    for logical_name, metadata in objects.items():
+        parts = _validated_asset_logical_parts(logical_name)
+        if not isinstance(metadata, dict):
+            raise ValueError("Asset index contains invalid object metadata.")
+        digest = metadata.get("hash")
+        size = metadata.get("size")
+        if (not isinstance(digest, str) or not _SHA1_RE.fullmatch(digest)
+                or not isinstance(size, int) or isinstance(size, bool) or size <= 0):
+            raise ValueError("Asset index contains invalid object hash or size.")
+        prepared_objects.append((parts, digest.lower(), size))
+
     assets_base = Path(assets_root).expanduser().absolute()
     game_base = Path(game_directory).expanduser().absolute()
     if map_to_resources:
@@ -795,17 +806,7 @@ def materialize_asset_index(asset_index, objects_root, assets_root,
     copied = 0
     reused = 0
 
-    for logical_name, metadata in objects.items():
-        parts = _validated_asset_logical_parts(logical_name)
-        if not isinstance(metadata, dict):
-            raise ValueError("Asset index contains invalid object metadata.")
-        digest = metadata.get("hash")
-        size = metadata.get("size")
-        if (not isinstance(digest, str) or not _SHA1_RE.fullmatch(digest)
-                or not isinstance(size, int) or isinstance(size, bool) or size <= 0):
-            raise ValueError("Asset index contains invalid object hash or size.")
-        digest = digest.lower()
-
+    for parts, digest, size in prepared_objects:
         destination = target_root.joinpath(*parts)
         parent = target_root
         for part in parts[:-1]:
