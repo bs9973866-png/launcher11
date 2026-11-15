@@ -15,7 +15,7 @@ from launcher_core import (ProcessOutputBuffer, SessionLogWriter, download_verif
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata,
                            extract_native_archives, discover_java_candidates, validate_java_executable,
                            build_minecraft_classpath, build_launch_plan,
-                           verify_cached_asset_objects, verify_cached_version_json, safe_extract_temurin_zip,
+                           verify_cached_asset_objects, materialize_asset_index, verify_cached_version_json, safe_extract_temurin_zip,
                            _fetch_temurin_asset, install_temurin_runtime,
                            search_modrinth_mods, fetch_modrinth_compatible_version,
                            download_verified_modrinth_file, list_installed_mods,
@@ -539,6 +539,136 @@ class AssetResolutionTests(unittest.TestCase):
     def test_rejects_missing_objects_map(self):
         with self.assertRaisesRegex(ValueError, "objects map"):
             resolve_asset_objects({})
+
+class AssetMaterializationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.assets = self.root / "assets"
+        self.objects = self.assets / "objects"
+        self.objects.mkdir(parents=True)
+        self.game = self.root / "game"
+        self.game.mkdir()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _asset_index(self, logical_name="sounds/test.ogg", payload=b"sound-data"):
+        digest = hashlib.sha1(payload).hexdigest()
+        object_path = self.objects / digest[:2] / digest
+        object_path.parent.mkdir(parents=True, exist_ok=True)
+        object_path.write_bytes(payload)
+        return {
+            "objects": {
+                logical_name: {"hash": digest, "size": len(payload)}
+            }
+        }, object_path, digest
+
+    def test_virtual_index_is_reconstructed_under_its_index_id(self):
+        index, _, _ = self._asset_index("sounds/test.ogg")
+        index["virtual"] = True
+        result = materialize_asset_index(
+            index, self.objects, self.assets, self.game, "1.7.10"
+        )
+        target = self.assets / "virtual" / "1.7.10" / "sounds" / "test.ogg"
+        self.assertEqual(target.read_bytes(), b"sound-data")
+        self.assertEqual(result["mode"], "virtual")
+        self.assertEqual(Path(result["game_assets_directory"]), target.parents[1])
+
+    def test_legacy_metadata_uses_the_legacy_virtual_directory(self):
+        index, _, _ = self._asset_index("newsound/random/click.ogg")
+        result = materialize_asset_index(
+            index, self.objects, self.assets, self.game, "pre-1.6",
+            metadata_assets="legacy",
+        )
+        target = self.assets / "virtual" / "legacy" / "newsound" / "random" / "click.ogg"
+        self.assertEqual(target.read_bytes(), b"sound-data")
+        self.assertEqual(result["mode"], "virtual")
+        self.assertEqual(Path(result["game_assets_directory"]), self.assets / "virtual" / "legacy")
+
+    def test_map_to_resources_is_reconstructed_inside_game_directory(self):
+        index, _, _ = self._asset_index("sound/step/grass1.ogg")
+        index["map_to_resources"] = True
+        result = materialize_asset_index(
+            index, self.objects, self.assets, self.game, "pre-1.6"
+        )
+        target = self.game / "resources" / "sound" / "step" / "grass1.ogg"
+        self.assertEqual(target.read_bytes(), b"sound-data")
+        self.assertEqual(result["mode"], "resources")
+        self.assertEqual(Path(result["game_assets_directory"]), self.game / "resources")
+
+    def test_modern_index_does_not_duplicate_content_addressed_objects(self):
+        index, object_path, _ = self._asset_index()
+        result = materialize_asset_index(
+            index, self.objects, self.assets, self.game, "19"
+        )
+        self.assertEqual(result["mode"], "objects")
+        self.assertEqual(result["count"], 0)
+        self.assertTrue(object_path.is_file())
+        self.assertFalse((self.assets / "virtual").exists())
+
+    def test_materialization_reuses_a_verified_destination(self):
+        index, _, _ = self._asset_index("textures/gui/widgets.png")
+        index["virtual"] = True
+        first = materialize_asset_index(
+            index, self.objects, self.assets, self.game, "test"
+        )
+        second = materialize_asset_index(
+            index, self.objects, self.assets, self.game, "test"
+        )
+        self.assertEqual(first["copied"], 1)
+        self.assertEqual(second["copied"], 0)
+        self.assertEqual(second["reused"], 1)
+
+    def test_rejects_traversal_and_windows_path_separators(self):
+        for logical_name in ("../outside.txt", r"textures\..\outside.png", "/absolute/file"):
+            index, _, _ = self._asset_index(logical_name)
+            index["virtual"] = True
+            with self.subTest(logical_name=logical_name), self.assertRaisesRegex(ValueError, "unsafe logical"):
+                materialize_asset_index(
+                    index, self.objects, self.assets, self.game, "test"
+                )
+
+    def test_rejects_object_hash_mismatch(self):
+        index, object_path, _ = self._asset_index("sounds/test.ogg")
+        index["virtual"] = True
+        object_path.write_bytes(b"bad-data!!")
+        with self.assertRaisesRegex(ValueError, "SHA-1 mismatch"):
+            materialize_asset_index(
+                index, self.objects, self.assets, self.game, "test"
+            )
+
+    def test_rejects_symlinked_object_file(self):
+        index, object_path, _ = self._asset_index("sounds/test.ogg")
+        index["virtual"] = True
+        outside = self.root / "outside"
+        outside.write_bytes(b"sound-data")
+        object_path.unlink()
+        try:
+            object_path.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlinks are unavailable on this runner.")
+        with self.assertRaisesRegex(ValueError, "symbolic-link"):
+            materialize_asset_index(
+                index, self.objects, self.assets, self.game, "test"
+            )
+
+    def test_rejects_symlinked_destination(self):
+        index, _, _ = self._asset_index("sounds/test.ogg")
+        index["virtual"] = True
+        destination = self.assets / "virtual" / "test" / "sounds" / "test.ogg"
+        destination.parent.mkdir(parents=True)
+        outside = self.root / "outside"
+        outside.write_bytes(b"sound-data")
+        try:
+            destination.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlinks are unavailable on this runner.")
+        with self.assertRaisesRegex(ValueError, "symbolic-link"):
+            materialize_asset_index(
+                index, self.objects, self.assets, self.game, "test"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -1956,6 +2086,25 @@ class LaunchPlanTests(unittest.TestCase):
                 java_validation={"compatible": True, "path": str(self.java)},
                 os_name="windows", arch="x86_64",
             )
+
+    def test_game_assets_placeholder_is_expanded(self):
+        metadata = dict(self.metadata)
+        metadata["arguments"] = {
+            "jvm": [],
+            "game": ["--assetsDir", "\x24{game_assets}"],
+        }
+        game_assets = self.assets / "virtual" / "legacy"
+        game_assets.mkdir(parents=True)
+        plan = build_launch_plan(
+            metadata, java_executable=self.java, client_jar=self.client,
+            libraries_root=self.libs, natives_directory=self.natives,
+            game_directory=self.game, assets_root=self.assets, auth=self.auth,
+            java_validation={"compatible": True, "path": str(self.java)},
+            os_name="windows", arch="x86_64",
+            game_assets_directory=game_assets,
+        )
+        self.assertEqual(plan["game_arguments"], ["--assetsDir", str(game_assets.resolve())])
+        self.assertEqual(plan["game_assets_directory"], str(game_assets.resolve()))
 
     def test_java_mismatch_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "does not match"):
