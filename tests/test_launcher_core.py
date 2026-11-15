@@ -629,6 +629,24 @@ class AssetMaterializationTests(unittest.TestCase):
                     index, self.objects, self.assets, self.game, "test"
                 )
 
+    def test_invalid_entry_is_rejected_before_any_asset_is_written(self):
+        index, _, _ = self._asset_index("sounds/valid.ogg")
+        index["virtual"] = True
+        invalid_digest = hashlib.sha1(b"invalid").hexdigest()
+        index["objects"]["../outside.ogg"] = {
+            "hash": invalid_digest,
+            "size": len(b"invalid"),
+        }
+        object_path = self.objects / invalid_digest[:2] / invalid_digest
+        object_path.parent.mkdir(parents=True, exist_ok=True)
+        object_path.write_bytes(b"invalid")
+        target_root = self.assets / "virtual" / "test"
+        with self.assertRaisesRegex(ValueError, "unsafe logical"):
+            materialize_asset_index(
+                index, self.objects, self.assets, self.game, "test"
+            )
+        self.assertFalse(target_root.exists())
+
     def test_rejects_object_hash_mismatch(self):
         index, object_path, _ = self._asset_index("sounds/test.ogg")
         index["virtual"] = True
