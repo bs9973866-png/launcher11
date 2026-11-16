@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from launcher_core import (ProcessOutputBuffer, SessionLogWriter, fetch_version_metadata, summarize_version_metadata, download_verified_client,
-                            download_verified_version_json, resolve_library_artifacts,
+                            download_verified_version_json, download_verified_logging_config, resolve_library_artifacts,
                             download_verified_libraries, resolve_asset_objects, materialize_asset_index, extract_native_archives,
                             discover_java_candidates, validate_java_executable,
                             build_launch_plan, verify_cached_asset_objects, verify_cached_version_json,
@@ -556,6 +556,13 @@ class FullInstallWorker(QThread):
             if metadata.get("id") != version_id:
                 raise ValueError("Downloaded version metadata ID does not match the selected version.")
 
+            if metadata.get("logging") is not None:
+                self.stage.emit("Downloading and verifying Minecraft logging configuration")
+            logging_config_path = download_verified_logging_config(
+                metadata.get("logging"), assets_root,
+                progress_callback=lambda done, total: self.progress.emit(done, total, "Log4j2 config"),
+            )
+
             asset_ref = metadata.get("assetIndex")
             if not isinstance(asset_ref, dict) or not asset_ref.get("id"):
                 raise ValueError("This Minecraft version has no supported asset index.")
@@ -615,6 +622,7 @@ class FullInstallWorker(QThread):
                 "assets": len(asset_paths),
                 "verified_assets": verification["count"],
                 "asset_layout": asset_materialization,
+                "logging_config": str(logging_config_path) if logging_config_path else None,
                 "game_directory": str(game_root),
                 "natives_directory": str(natives_root),
             })
@@ -839,6 +847,9 @@ class LaunchCheckWorker(QThread):
                 asset_verification["index"], objects_root, home / "assets",
                 game_directory, asset_ref["id"], metadata.get("assets"),
             )
+            logging_config_path = download_verified_logging_config(
+                metadata.get("logging"), home / "assets"
+            )
             auth = {
                 "player_name": self.nickname,
                 "uuid": offline_uuid(self.nickname),
@@ -858,6 +869,7 @@ class LaunchCheckWorker(QThread):
                 assets_root=home / "assets",
                 game_assets_directory=asset_materialization["game_assets_directory"],
                 auth=auth,
+                logging_config_path=logging_config_path,
                 jvm_arguments=[f"-Xms512M", f"-Xmx{self.ram_mb}M", *self.extra_jvm],
                 version_type=self.manifest_entry.get("type", "release"),
                 launcher_name="VOIDEX",
