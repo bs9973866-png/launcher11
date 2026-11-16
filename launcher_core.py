@@ -260,6 +260,144 @@ def download_verified_client(summary, destination, progress_callback=None, opene
                 pass
 
 
+LOGGING_CONFIG_DOWNLOAD_HOSTS = {"launcher.mojang.com", "piston-data.mojang.com"}
+MAX_LOGGING_CONFIG_BYTES = 4 * 1024 * 1024
+_LOGGING_CONFIG_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+class LoggingConfigRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep Mojang logging configuration downloads on official HTTPS hosts."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlparse(newurl)
+        if (parsed.scheme != "https"
+                or parsed.hostname not in LOGGING_CONFIG_DOWNLOAD_HOSTS
+                or parsed.username is not None or parsed.password is not None
+                or parsed.fragment or parsed.port not in (None, 443)):
+            raise ValueError("Minecraft logging configuration redirected to an untrusted host.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _validated_logging_config(logging_metadata):
+    """Validate the client Log4j2 descriptor from a Mojang version document."""
+    if logging_metadata is None:
+        return None
+    if not isinstance(logging_metadata, dict):
+        raise ValueError("Minecraft logging metadata must be an object.")
+    client = logging_metadata.get("client")
+    if client is None:
+        return None
+    if not isinstance(client, dict) or client.get("type") != "log4j2-xml":
+        raise ValueError("Minecraft client logging metadata has an unsupported format.")
+    argument = client.get("argument")
+    if argument != "-Dlog4j.configurationFile=\${path}":
+        raise ValueError("Minecraft client logging JVM argument is invalid.")
+    descriptor = client.get("file")
+    if not isinstance(descriptor, dict):
+        raise ValueError("Minecraft client logging file metadata is missing.")
+    file_id = descriptor.get("id")
+    if not isinstance(file_id, str) or not _LOGGING_CONFIG_ID_RE.fullmatch(file_id):
+        raise ValueError("Minecraft logging configuration filename is invalid.")
+    sha1 = descriptor.get("sha1")
+    if not isinstance(sha1, str) or not _SHA1_RE.fullmatch(sha1):
+        raise ValueError("Minecraft logging configuration SHA-1 is invalid.")
+    size = descriptor.get("size")
+    if (not isinstance(size, int) or isinstance(size, bool)
+            or size <= 0 or size > MAX_LOGGING_CONFIG_BYTES):
+        raise ValueError("Minecraft logging configuration size is invalid.")
+    url = descriptor.get("url")
+    parsed = urlparse(url if isinstance(url, str) else "")
+    if (parsed.scheme != "https"
+            or parsed.hostname not in LOGGING_CONFIG_DOWNLOAD_HOSTS
+            or parsed.username is not None or parsed.password is not None
+            or parsed.fragment or parsed.port not in (None, 443)
+            or not parsed.path):
+        raise ValueError("Minecraft logging configuration URL is not trusted.")
+    return {
+        "id": file_id, "sha1": sha1.lower(), "size": size,
+        "url": url, "argument": argument,
+    }
+
+
+def download_verified_logging_config(logging_metadata, assets_root,
+                                     progress_callback=None, opener=None):
+    """Cache Mojang's Log4j2 client config under assets/log_configs after SHA-1 verification."""
+    descriptor = _validated_logging_config(logging_metadata)
+    if descriptor is None:
+        return None
+
+    root = Path(assets_root).expanduser()
+    config_directory = _ensure_asset_directory(root, root / "log_configs")
+    target = config_directory / descriptor["id"]
+    if target.is_symlink():
+        raise ValueError("Minecraft logging configuration refuses symbolic-link files.")
+    if target.exists() and not target.is_file():
+        raise ValueError("Minecraft logging configuration path is not a regular file.")
+
+    def matches(path):
+        candidate = Path(path)
+        if candidate.is_symlink() or not candidate.is_file():
+            return False
+        if candidate.stat().st_size != descriptor["size"]:
+            return False
+        digest = hashlib.sha1()
+        with candidate.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == descriptor["sha1"]
+
+    if target.is_file() and matches(target):
+        if progress_callback:
+            progress_callback(descriptor["size"], descriptor["size"])
+        return target
+
+    request = urllib.request.Request(
+        descriptor["url"], headers={"User-Agent": "VOIDEX-Launcher/1.0"}
+    )
+    if opener is None:
+        opener = urllib.request.build_opener(LoggingConfigRedirectHandler())
+
+    temporary_path = None
+    digest = hashlib.sha1()
+    downloaded = 0
+    try:
+        with opener.open(request, timeout=30) as response:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=target.name + ".", suffix=".part",
+                dir=str(target.parent), delete=False
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                while True:
+                    chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+                    if downloaded > descriptor["size"]:
+                        raise ValueError("Minecraft logging configuration is larger than metadata declares.")
+                    temporary.write(chunk)
+                    digest.update(chunk)
+                    if progress_callback:
+                        progress_callback(downloaded, descriptor["size"])
+        if downloaded != descriptor["size"]:
+            raise ValueError(
+                "Incomplete Minecraft logging configuration: "
+                f"expected {descriptor['size']} bytes, received {downloaded}."
+            )
+        if digest.hexdigest() != descriptor["sha1"]:
+            raise ValueError("Minecraft logging configuration SHA-1 verification failed.")
+        os.replace(temporary_path, target)
+        temporary_path = None
+        if progress_callback:
+            progress_callback(downloaded, downloaded)
+        return target
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 VERSION_METADATA_HOSTS = {MANIFEST_HOST}
 MAX_VERSION_JSON_BYTES = 16 * 1024 * 1024
 
@@ -1491,7 +1629,7 @@ def build_launch_plan(version_metadata, *, java_executable, client_jar,
                       resolution=(1280, 720), version_type="release",
                       launcher_name="VOIDEX", launcher_version="0.1",
                       os_name=None, arch=None, features=None,
-                      game_assets_directory=None):
+                      game_assets_directory=None, logging_config_path=None):
     """Return a validated process argv/cwd plan; never executes Java.
 
     Auth must explicitly provide player_name, uuid, access_token and user_type.
@@ -1595,6 +1733,36 @@ def build_launch_plan(version_metadata, *, java_executable, client_jar,
     if not isinstance(extra_jvm, (list, tuple)) or any(not isinstance(arg, str) for arg in extra_jvm):
         raise ValueError("Additional JVM arguments must be a list of strings.")
     jvm_args.extend(extra_jvm)
+    logging_descriptor = _validated_logging_config(version_metadata.get("logging"))
+    if logging_descriptor is not None:
+        if logging_config_path is None:
+            raise ValueError("Minecraft logging configuration is missing; install the selected version again.")
+        logging_path = Path(logging_config_path).expanduser()
+        logging_directory = assets_path / "log_configs"
+        expected_logging_path = logging_directory / logging_descriptor["id"]
+        if (logging_directory.is_symlink() or logging_path.is_symlink()
+                or not logging_path.is_file()
+                or logging_path.resolve() != expected_logging_path.resolve()):
+            raise ValueError("Minecraft logging configuration file is missing or unsafe.")
+        if logging_path.stat().st_size != logging_descriptor["size"]:
+            raise ValueError("Minecraft logging configuration size mismatch.")
+        logging_digest = hashlib.sha1()
+        with logging_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
+                logging_digest.update(chunk)
+        if logging_digest.hexdigest() != logging_descriptor["sha1"]:
+            raise ValueError("Minecraft logging configuration SHA-1 mismatch.")
+        logging_argument = logging_descriptor["argument"].replace(
+            "\${path}", str(logging_path.resolve())
+        )
+        existing_logging_arguments = [
+            arg for arg in jvm_args
+            if arg.startswith("-Dlog4j.configurationFile=")
+        ]
+        if existing_logging_arguments and existing_logging_arguments != [logging_argument]:
+            raise ValueError("Conflicting Log4j2 configuration JVM argument.")
+        if not existing_logging_arguments:
+            jvm_args.append(logging_argument)
     if not any(arg.startswith("-Djava.library.path=") for arg in jvm_args):
         jvm_args.append(f"-Djava.library.path={natives_path}")
     if not any(arg in {"-cp", "-classpath"} for arg in jvm_args):
