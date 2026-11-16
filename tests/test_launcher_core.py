@@ -182,7 +182,8 @@ class LoggingConfigDownloadTests(unittest.TestCase):
                 progress_callback=lambda done, total: progress.append((done, total)),
                 opener=opener,
             )
-            self.assertEqual(result, Path(directory) / "log_configs" / "client-1.12.xml")
+            expected = Path(directory) / "log_configs" / "client-1.12.xml"
+            self.assertTrue(result.samefile(expected))
             self.assertEqual(result.read_bytes(), self.payload)
             self.assertEqual(progress[-1], (len(self.payload), len(self.payload)))
 
@@ -192,7 +193,8 @@ class LoggingConfigDownloadTests(unittest.TestCase):
             target.parent.mkdir()
             target.write_bytes(self.payload)
             opener = Mock()
-            self.assertEqual(download_verified_logging_config(self.metadata, directory, opener=opener), target)
+            result = download_verified_logging_config(self.metadata, directory, opener=opener)
+            self.assertTrue(result.samefile(target))
             opener.open.assert_not_called()
 
     def test_checksum_failure_preserves_existing_config_and_cleans_temp(self):
