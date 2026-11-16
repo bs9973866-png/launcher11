@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 import subprocess
 import urllib.request
 
-from launcher_core import (ProcessOutputBuffer, SessionLogWriter, download_verified_client, download_verified_library, download_verified_libraries, download_verified_version_json,
+from launcher_core import (ProcessOutputBuffer, SessionLogWriter, download_verified_client, download_verified_logging_config, download_verified_library, download_verified_libraries, download_verified_version_json,
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata,
                            extract_native_archives, discover_java_candidates, validate_java_executable,
                            build_minecraft_classpath, build_launch_plan,
@@ -154,6 +154,100 @@ class ClientDownloadTests(unittest.TestCase):
             opener.open.return_value = FakeResponse(self.payload)
             with self.assertRaisesRegex(ValueError, "Incomplete"):
                 download_verified_client(bad, Path(directory) / "client.jar", opener=opener)
+
+
+class LoggingConfigDownloadTests(unittest.TestCase):
+    def setUp(self):
+        self.payload = b'<?xml version="1.0"?><Configuration/>'
+        self.metadata = {
+            "client": {
+                "argument": "-Dlog4j.configurationFile=\${path}",
+                "file": {
+                    "id": "client-1.12.xml",
+                    "sha1": hashlib.sha1(self.payload).hexdigest(),
+                    "size": len(self.payload),
+                    "url": "https://launcher.mojang.com/v1/objects/example/client-1.12.xml",
+                },
+                "type": "log4j2-xml",
+            }
+        }
+
+    def test_downloads_and_verifies_logging_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            opener = Mock()
+            opener.open.return_value = FakeResponse(self.payload)
+            progress = []
+            result = download_verified_logging_config(
+                self.metadata, Path(directory),
+                progress_callback=lambda done, total: progress.append((done, total)),
+                opener=opener,
+            )
+            self.assertEqual(result, Path(directory) / "log_configs" / "client-1.12.xml")
+            self.assertEqual(result.read_bytes(), self.payload)
+            self.assertEqual(progress[-1], (len(self.payload), len(self.payload)))
+
+    def test_reuses_verified_logging_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "log_configs" / "client-1.12.xml"
+            target.parent.mkdir()
+            target.write_bytes(self.payload)
+            opener = Mock()
+            self.assertEqual(download_verified_logging_config(self.metadata, directory, opener=opener), target)
+            opener.open.assert_not_called()
+
+    def test_checksum_failure_preserves_existing_config_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "log_configs" / "client-1.12.xml"
+            target.parent.mkdir()
+            target.write_bytes(b"previous config")
+            bad = json.loads(json.dumps(self.metadata))
+            bad["client"]["file"]["sha1"] = "0" * 40
+            opener = Mock()
+            opener.open.return_value = FakeResponse(self.payload)
+            with self.assertRaisesRegex(ValueError, "SHA-1"):
+                download_verified_logging_config(bad, directory, opener=opener)
+            self.assertEqual(target.read_bytes(), b"previous config")
+            self.assertEqual(list(target.parent.glob("*.part")), [])
+
+    def test_rejects_untrusted_url_before_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bad = json.loads(json.dumps(self.metadata))
+            bad["client"]["file"]["url"] = "https://example.com/client.xml"
+            opener = Mock()
+            with self.assertRaisesRegex(ValueError, "URL is not trusted"):
+                download_verified_logging_config(bad, directory, opener=opener)
+            opener.open.assert_not_called()
+
+    def test_rejects_unsafe_filename_before_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bad = json.loads(json.dumps(self.metadata))
+            bad["client"]["file"]["id"] = "../client.xml"
+            opener = Mock()
+            with self.assertRaisesRegex(ValueError, "filename is invalid"):
+                download_verified_logging_config(bad, directory, opener=opener)
+            opener.open.assert_not_called()
+
+    def test_rejects_oversized_and_truncated_responses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            oversized = json.loads(json.dumps(self.metadata))
+            oversized["client"]["file"]["size"] = len(self.payload) - 1
+            opener = Mock()
+            opener.open.return_value = FakeResponse(self.payload)
+            with self.assertRaisesRegex(ValueError, "larger than metadata"):
+                download_verified_logging_config(oversized, directory, opener=opener)
+            self.assertEqual(list((Path(directory) / "log_configs").glob("*.part")), [])
+
+            truncated = json.loads(json.dumps(self.metadata))
+            truncated["client"]["file"]["size"] = len(self.payload) + 1
+            opener = Mock()
+            opener.open.return_value = FakeResponse(self.payload)
+            with self.assertRaisesRegex(ValueError, "Incomplete"):
+                download_verified_logging_config(truncated, directory, opener=opener)
+            self.assertEqual(list((Path(directory) / "log_configs").glob("*.part")), [])
+
+    def test_missing_client_logging_descriptor_is_optional(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(download_verified_logging_config({"server": {}}, directory))
 
 
 class VersionJsonCacheTests(unittest.TestCase):
@@ -2123,6 +2217,66 @@ class LaunchPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan["game_arguments"], ["--assetsDir", str(game_assets.resolve())])
         self.assertEqual(plan["game_assets_directory"], str(game_assets.resolve()))
+
+    def test_logging_configuration_is_verified_and_added_to_jvm_arguments(self):
+        metadata = dict(self.metadata)
+        payload = b"<Configuration/>"
+        logging_directory = self.assets / "log_configs"
+        logging_directory.mkdir()
+        config_path = logging_directory / "client-1.12.xml"
+        config_path.write_bytes(payload)
+        metadata["logging"] = {
+            "client": {
+                "argument": "-Dlog4j.configurationFile=\${path}",
+                "file": {
+                    "id": "client-1.12.xml",
+                    "sha1": hashlib.sha1(payload).hexdigest(),
+                    "size": len(payload),
+                    "url": "https://launcher.mojang.com/v1/objects/example/client-1.12.xml",
+                },
+                "type": "log4j2-xml",
+            }
+        }
+        plan = build_launch_plan(
+            metadata, java_executable=self.java, client_jar=self.client,
+            libraries_root=self.libs, natives_directory=self.natives,
+            game_directory=self.game, assets_root=self.assets, auth=self.auth,
+            java_validation={"compatible": True, "path": str(self.java)},
+            os_name="windows", arch="x86_64", logging_config_path=config_path,
+        )
+        expected = f"-Dlog4j.configurationFile={config_path.resolve()}"
+        self.assertIn(expected, plan["jvm_arguments"])
+
+    def test_logging_configuration_is_required_and_checksum_checked(self):
+        metadata = dict(self.metadata)
+        payload = b"<Configuration/>"
+        metadata["logging"] = {
+            "client": {
+                "argument": "-Dlog4j.configurationFile=\${path}",
+                "file": {
+                    "id": "client-1.12.xml",
+                    "sha1": hashlib.sha1(payload).hexdigest(),
+                    "size": len(payload),
+                    "url": "https://launcher.mojang.com/v1/objects/example/client-1.12.xml",
+                },
+                "type": "log4j2-xml",
+            }
+        }
+        kwargs = dict(
+            java_executable=self.java, client_jar=self.client,
+            libraries_root=self.libs, natives_directory=self.natives,
+            game_directory=self.game, assets_root=self.assets, auth=self.auth,
+            java_validation={"compatible": True, "path": str(self.java)},
+            os_name="windows", arch="x86_64",
+        )
+        with self.assertRaisesRegex(ValueError, "configuration is missing"):
+            build_launch_plan(metadata, **kwargs)
+
+        config_path = self.assets / "log_configs" / "client-1.12.xml"
+        config_path.parent.mkdir()
+        config_path.write_bytes(b"<tampered/>")
+        with self.assertRaisesRegex(ValueError, "size mismatch|SHA-1 mismatch"):
+            build_launch_plan(metadata, logging_config_path=config_path, **kwargs)
 
     def test_java_mismatch_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "does not match"):
