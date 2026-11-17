@@ -11,7 +11,7 @@ from pathlib import Path
 
 from launcher_core import (ProcessOutputBuffer, SessionLogWriter, fetch_version_metadata, summarize_version_metadata, download_verified_client,
                             download_verified_version_json, download_verified_logging_config, resolve_library_artifacts,
-                            download_verified_libraries, resolve_asset_objects, materialize_asset_index, extract_native_archives,
+                            download_verified_libraries, resolve_asset_objects, materialize_asset_index, extract_native_archives, verify_cached_native_archives,
                             discover_java_candidates, validate_java_executable,
                             build_launch_plan, verify_cached_asset_objects, verify_cached_version_json,
                             install_temurin_runtime, search_modrinth_mods,
@@ -458,6 +458,11 @@ class NativeInstallWorker(QThread):
             artifacts = resolve_library_artifacts(metadata, os_name="windows", arch="x86_64")
             native_artifacts = [item for item in artifacts if item.get("source") == "native"]
             if not native_artifacts:
+                self.natives_root.mkdir(parents=True, exist_ok=True)
+                extract_native_archives([], self.natives_root)
+                (self.natives_root / ".voidex-ready").write_text(
+                    "no native archives required", encoding="utf-8"
+                )
                 self.completed.emit({"archives": 0, "files": 0, "directory": str(self.natives_root)})
                 return
             archives = download_verified_libraries(
@@ -584,7 +589,7 @@ class FullInstallWorker(QThread):
             native_artifacts = [item for item in artifacts if item.get("source") == "native"]
             native_paths = [libraries_root / item["path"] for item in native_artifacts]
             natives_root.mkdir(parents=True, exist_ok=True)
-            extracted = extract_native_archives(native_paths, natives_root) if native_paths else []
+            extracted = extract_native_archives(native_paths, natives_root)
             if not any(natives_root.iterdir()):
                 (natives_root / ".voidex-ready").write_text("no native archives required", encoding="utf-8")
 
@@ -796,8 +801,18 @@ class LaunchCheckWorker(QThread):
 
             libraries = home / "libraries"
             natives = home / "versions" / self.version_id / "natives"
-            if natives.is_symlink() or not natives.is_dir() or not any(natives.iterdir()):
-                raise ValueError("Native libraries are not prepared. Press Prepare natives first.")
+            native_artifacts = [
+                artifact for artifact in resolve_library_artifacts(
+                    metadata, os_name="windows", arch="x86_64"
+                ) if artifact.get("source") == "native"
+            ]
+            if not natives.exists() and not native_artifacts:
+                if any(component.is_symlink() for component in (natives, *natives.parents)):
+                    raise ValueError("Native directory path contains a symbolic link.")
+                natives.mkdir(parents=True, exist_ok=True)
+            native_verification = verify_cached_native_archives(
+                native_artifacts, libraries, natives
+            )
 
             asset_ref = metadata.get("assetIndex") or {}
             if not isinstance(asset_ref, dict) or not asset_ref.get("id"):
