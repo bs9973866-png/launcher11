@@ -930,7 +930,6 @@ class NativeArchiveVerificationTests(unittest.TestCase):
         archive, artifact = self.make_native_artifact()
         original = archive.read_bytes()
         archive.write_bytes(b"X" + original[1:])
-        extract_native_archives([archive], self.natives)
         with self.assertRaisesRegex(ValueError, "SHA-1 mismatch"):
             verify_cached_native_archives([artifact], self.libraries, self.natives)
 
