@@ -1041,6 +1041,32 @@ def _validated_native_member_name(name):
     return relative
 
 
+def _prune_native_tree(root, expected_paths):
+    """Remove stale native files after a complete extraction pass."""
+    expected = {str(path).casefold() for path in expected_paths}
+    for current, directories, files in os.walk(root, topdown=False, followlinks=False):
+        base = Path(current)
+        for name in directories:
+            child = base / name
+            if child.is_symlink():
+                raise ValueError("Native directory contains a symbolic link.")
+        for name in files:
+            target = base / name
+            if target.is_symlink():
+                raise ValueError("Native directory contains a symbolic link.")
+            relative = target.relative_to(root).as_posix()
+            if relative.casefold() not in expected:
+                target.unlink()
+        for name in directories:
+            child = base / name
+            if child.is_symlink():
+                raise ValueError("Native directory contains a symbolic link.")
+            try:
+                child.rmdir()
+            except OSError:
+                pass
+
+
 def extract_native_archives(archives, destination,
                             max_entries=MAX_NATIVE_ARCHIVE_ENTRIES,
                             max_total_size=MAX_NATIVE_TOTAL_UNCOMPRESSED,
@@ -1056,7 +1082,9 @@ def extract_native_archives(archives, destination,
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise ValueError("Native extraction limits must be positive integers.")
 
-    root = Path(destination)
+    root = Path(destination).expanduser()
+    if root.is_symlink():
+        raise ValueError("Native destination must not be a symbolic link.")
     root.mkdir(parents=True, exist_ok=True)
     root = root.resolve()
     planned = []
@@ -1092,9 +1120,12 @@ def extract_native_archives(archives, destination,
                     if total_size > max_total_size:
                         raise ValueError("Native archives exceed the total extraction size limit.")
                     key = relative.as_posix()
-                    if key in seen_files:
+                    folded_key = key.casefold()
+                    if folded_key == ".voidex-ready":
+                        raise ValueError("Native archive uses a reserved VOIDEX marker path.")
+                    if folded_key in seen_files:
                         raise ValueError("Native archives contain duplicate output paths.")
-                    seen_files.add(key)
+                    seen_files.add(folded_key)
                     planned.append((archive_file, info, relative))
         except zipfile.BadZipFile as exc:
             raise ValueError(f"Invalid native archive: {archive_file}") from exc
@@ -1102,7 +1133,7 @@ def extract_native_archives(archives, destination,
     # Reject a file that would also need to act as a parent directory.
     for key in seen_files:
         parts = PurePosixPath(key).parts
-        if any("/".join(parts[:index]) in seen_files for index in range(1, len(parts))):
+        if any("/".join(parts[:index]).casefold() in seen_files for index in range(1, len(parts))):
             raise ValueError("Native archive file/directory path collision detected.")
 
     extracted = []
@@ -1154,7 +1185,159 @@ def extract_native_archives(archives, destination,
                 except OSError:
                     pass
 
+    _prune_native_tree(root, (relative.as_posix() for _, _, relative in planned))
     return extracted
+
+
+def verify_cached_native_archives(native_artifacts, libraries_root, natives_directory,
+                                  max_entries=MAX_NATIVE_ARCHIVE_ENTRIES,
+                                  max_total_size=MAX_NATIVE_TOTAL_UNCOMPRESSED,
+                                  max_file_size=MAX_NATIVE_FILE_SIZE):
+    """Verify native archives and require the extracted native tree to match them exactly."""
+    if not isinstance(native_artifacts, (list, tuple)):
+        raise ValueError("Native artifacts must be provided as a list.")
+    for limit in (max_entries, max_total_size, max_file_size):
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("Native verification limits must be positive integers.")
+
+    native_root = Path(natives_directory).expanduser()
+    for current in (native_root, *native_root.parents):
+        if current.is_symlink():
+            raise ValueError("Native directory path contains a symbolic link.")
+    if not native_root.exists():
+        if native_artifacts:
+            raise ValueError("Native directory is missing; prepare native libraries again.")
+        return {"archives": 0, "files": 0}
+    if not native_root.is_dir():
+        raise ValueError("Native directory is not a directory.")
+    root = native_root.resolve()
+
+    library_root_path = Path(libraries_root).expanduser()
+    for current in (library_root_path, *library_root_path.parents):
+        if current.is_symlink():
+            raise ValueError("Libraries path contains a symbolic link.")
+    if native_artifacts and not library_root_path.is_dir():
+        raise ValueError("Native library cache is missing.")
+    library_root = library_root_path.resolve()
+
+    expected = {}
+    entry_count = 0
+    total_size = 0
+    for artifact in native_artifacts:
+        validated = _validated_library_artifact(artifact, "native")
+        archive_relative = PurePosixPath(validated["path"])
+        if (archive_relative.is_absolute()
+                or any(part in {"", ".", ".."} for part in archive_relative.parts)
+                or not archive_relative.parts
+                or ":" in archive_relative.parts[0]):
+            raise ValueError("Native archive path is unsafe.")
+        archive_path = library_root.joinpath(*archive_relative.parts)
+        current = library_root
+        for part in archive_relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError("Native archive path contains a symbolic link.")
+        resolved_archive = archive_path.resolve()
+        try:
+            resolved_archive.relative_to(library_root)
+        except ValueError as exc:
+            raise ValueError("Native archive path escapes the libraries directory.") from exc
+        if not archive_path.is_file():
+            raise ValueError(f"Native archive is missing: {validated['path']}")
+        if archive_path.stat().st_size != validated["size"]:
+            raise ValueError(f"Native archive size mismatch: {validated['path']}")
+        digest = hashlib.sha1()
+        with archive_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(DOWNLOAD_CHUNK_SIZE), b""):
+                digest.update(chunk)
+        if digest.hexdigest().lower() != validated["sha1"]:
+            raise ValueError(f"Native archive SHA-1 mismatch: {validated['path']}")
+
+        try:
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                for info in archive.infolist():
+                    entry_count += 1
+                    if entry_count > max_entries:
+                        raise ValueError("Native archives exceed the verification entry-count limit.")
+                    relative = _validated_native_member_name(info.filename)
+                    mode = (info.external_attr >> 16) & 0xFFFF
+                    if stat.S_ISLNK(mode):
+                        raise ValueError("Native archive contains a symbolic link.")
+                    if info.flag_bits & 0x1:
+                        raise ValueError("Encrypted native archive entries are not supported.")
+                    if relative.parts[0].upper() == "META-INF" or info.is_dir():
+                        continue
+                    if info.file_size < 0 or info.file_size > max_file_size:
+                        raise ValueError("Native archive contains a file above the verification size limit.")
+                    total_size += info.file_size
+                    if total_size > max_total_size:
+                        raise ValueError("Native archives exceed the verification total size limit.")
+                    key = relative.as_posix()
+                    folded_key = key.casefold()
+                    if folded_key == ".voidex-ready":
+                        raise ValueError("Native archive uses a reserved VOIDEX marker path.")
+                    if folded_key in expected:
+                        raise ValueError("Native archives contain duplicate output paths.")
+                    target = root.joinpath(*relative.parts)
+                    parent = root
+                    for part in relative.parts[:-1]:
+                        parent = parent / part
+                        if parent.is_symlink():
+                            raise ValueError("Extracted native path contains a symbolic link.")
+                        if not parent.is_dir():
+                            raise ValueError(f"Extracted native directory is missing: {key}")
+                    if target.is_symlink():
+                        raise ValueError("Extracted native file is a symbolic link.")
+                    if not target.is_file():
+                        raise ValueError(f"Extracted native file is missing: {key}")
+                    if target.stat().st_size != info.file_size:
+                        raise ValueError(f"Extracted native file size mismatch: {key}")
+                    written = 0
+                    with archive.open(info, "r") as source, target.open("rb") as extracted:
+                        while True:
+                            expected_chunk = source.read(DOWNLOAD_CHUNK_SIZE)
+                            actual_chunk = extracted.read(DOWNLOAD_CHUNK_SIZE)
+                            if expected_chunk != actual_chunk:
+                                raise ValueError(f"Extracted native file does not match its archive: {key}")
+                            if not expected_chunk:
+                                break
+                            written += len(expected_chunk)
+                            if written > info.file_size or written > max_file_size:
+                                raise ValueError("Native archive entry expanded beyond its declared size.")
+                    if written != info.file_size:
+                        raise ValueError(f"Extracted native file is truncated: {key}")
+                    expected[folded_key] = key
+        except zipfile.BadZipFile as exc:
+            raise ValueError(f"Invalid native archive: {archive_path}") from exc
+
+    for key in expected:
+        parts = PurePosixPath(expected[key]).parts
+        if any("/".join(parts[:index]).casefold() in expected for index in range(1, len(parts))):
+            raise ValueError("Native archive file/directory path collision detected.")
+
+    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+        base = Path(current)
+        for name in directories:
+            if (base / name).is_symlink():
+                raise ValueError("Native directory contains a symbolic link.")
+        for name in files:
+            target = base / name
+            if target.is_symlink():
+                raise ValueError("Native directory contains a symbolic link.")
+            relative = target.relative_to(root).as_posix()
+            folded_relative = relative.casefold()
+            if folded_relative == ".voidex-ready":
+                try:
+                    marker = target.read_text(encoding="utf-8")
+                except (OSError, UnicodeError) as exc:
+                    raise ValueError("Native readiness marker is invalid.") from exc
+                if marker != "no native archives required":
+                    raise ValueError("Native readiness marker is invalid.")
+                continue
+            if folded_relative not in expected:
+                raise ValueError(f"Unexpected stale native file: {relative}")
+
+    return {"archives": len(native_artifacts), "files": len(expected)}
 
 
 _JAVA_VERSION_RE = re.compile(r'version "([^"]+)"')
