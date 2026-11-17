@@ -977,6 +977,25 @@ class NativeArchiveVerificationTests(unittest.TestCase):
         self.assertFalse((self.natives / ".voidex-ready").exists())
 
 
+    def test_empty_extraction_prunes_all_old_native_files(self):
+        (self.natives / "stale.dll").write_bytes(b"stale")
+        (self.natives / "nested").mkdir()
+        (self.natives / "nested" / "old.dll").write_bytes(b"old")
+        extract_native_archives([], self.natives)
+        self.assertEqual(list(self.natives.iterdir()), [])
+
+    def test_extraction_rejects_case_insensitive_duplicate_paths(self):
+        first = self.root / "first.jar"
+        second = self.root / "second.jar"
+        with zipfile.ZipFile(first, "w") as archive:
+            archive.writestr("Native.dll", b"first")
+        with zipfile.ZipFile(second, "w") as archive:
+            archive.writestr("native.dll", b"second")
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            extract_native_archives([first, second], self.natives)
+        self.assertEqual(list(self.natives.iterdir()), [])
+
+
 class JavaDiscoveryTests(unittest.TestCase):
     def test_discovers_java_home_and_extra_path_candidates(self):
         with tempfile.TemporaryDirectory() as directory:
