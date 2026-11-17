@@ -908,7 +908,7 @@ class NativeArchiveVerificationTests(unittest.TestCase):
         archive, artifact = self.make_native_artifact()
         extract_native_archives([archive], self.natives)
         target = self.natives / "org/example/native.dll"
-        target.write_bytes(b"modified-native-content")
+        target.write_bytes(b"Xative-binary-content")
         with self.assertRaisesRegex(ValueError, "does not match"):
             verify_cached_native_archives([artifact], self.libraries, self.natives)
 
