@@ -13,7 +13,7 @@ import urllib.request
 
 from launcher_core import (ProcessOutputBuffer, SessionLogWriter, download_verified_client, download_verified_logging_config, download_verified_library, download_verified_libraries, download_verified_version_json,
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata,
-                           extract_native_archives, discover_java_candidates, validate_java_executable,
+                           extract_native_archives, verify_cached_native_archives, discover_java_candidates, validate_java_executable,
                            build_minecraft_classpath, build_launch_plan,
                            verify_cached_asset_objects, materialize_asset_index, verify_cached_version_json, safe_extract_temurin_zip,
                            _fetch_temurin_asset, install_temurin_runtime,
@@ -868,6 +868,114 @@ class NativeArchiveExtractionTests(unittest.TestCase):
                 extract_native_archives([archive], output, max_file_size=3)
             self.assertEqual(list(output.rglob("*.part")), [])
 
+
+
+class NativeArchiveVerificationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.libraries = self.root / "libraries"
+        self.natives = self.root / "natives"
+        self.libraries.mkdir()
+        self.natives.mkdir()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def make_native_artifact(self):
+        relative = "org/example/native/1.0/native-1.0.jar"
+        archive_path = self.libraries / relative
+        archive_path.parent.mkdir(parents=True)
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("org/example/native.dll", b"native-binary-content")
+            archive.writestr("META-INF/MANIFEST.MF", b"manifest")
+        payload = archive_path.read_bytes()
+        artifact = {
+            "path": relative,
+            "url": "https://libraries.minecraft.net/" + relative,
+            "sha1": hashlib.sha1(payload).hexdigest(),
+            "size": len(payload),
+        }
+        return archive_path, artifact
+
+    def test_verifies_extracted_native_files_against_archive(self):
+        archive, artifact = self.make_native_artifact()
+        extract_native_archives([archive], self.natives)
+        result = verify_cached_native_archives([artifact], self.libraries, self.natives)
+        self.assertEqual(result, {"archives": 1, "files": 1})
+
+    def test_rejects_modified_extracted_native_file(self):
+        archive, artifact = self.make_native_artifact()
+        extract_native_archives([archive], self.natives)
+        target = self.natives / "org/example/native.dll"
+        target.write_bytes(b"modified-native-content")
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            verify_cached_native_archives([artifact], self.libraries, self.natives)
+
+    def test_rejects_missing_extracted_native_file(self):
+        archive, artifact = self.make_native_artifact()
+        extract_native_archives([archive], self.natives)
+        (self.natives / "org/example/native.dll").unlink()
+        with self.assertRaisesRegex(ValueError, "missing"):
+            verify_cached_native_archives([artifact], self.libraries, self.natives)
+
+    def test_rejects_unexpected_stale_native_file(self):
+        archive, artifact = self.make_native_artifact()
+        extract_native_archives([archive], self.natives)
+        (self.natives / "old-native.dll").write_bytes(b"stale")
+        with self.assertRaisesRegex(ValueError, "Unexpected stale native file"):
+            verify_cached_native_archives([artifact], self.libraries, self.natives)
+
+    def test_rejects_native_archive_checksum_mismatch(self):
+        archive, artifact = self.make_native_artifact()
+        original = archive.read_bytes()
+        archive.write_bytes(b"X" + original[1:])
+        extract_native_archives([archive], self.natives)
+        with self.assertRaisesRegex(ValueError, "SHA-1 mismatch"):
+            verify_cached_native_archives([artifact], self.libraries, self.natives)
+
+    def test_empty_native_set_is_valid_without_a_directory(self):
+        result = verify_cached_native_archives([], self.libraries, self.root / "not-created")
+        self.assertEqual(result, {"archives": 0, "files": 0})
+
+    def test_empty_native_set_accepts_only_the_known_marker(self):
+        marker = self.natives / ".voidex-ready"
+        marker.write_text("no native archives required", encoding="utf-8")
+        result = verify_cached_native_archives([], self.libraries, self.natives)
+        self.assertEqual(result, {"archives": 0, "files": 0})
+        marker.write_text("unexpected", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "marker is invalid"):
+            verify_cached_native_archives([], self.libraries, self.natives)
+
+    def test_empty_native_set_rejects_unexpected_files(self):
+        (self.natives / "stale.dll").write_bytes(b"stale")
+        with self.assertRaisesRegex(ValueError, "Unexpected stale native file"):
+            verify_cached_native_archives([], self.libraries, self.natives)
+
+    def test_rejects_symlinked_extracted_native_file(self):
+        archive, artifact = self.make_native_artifact()
+        extract_native_archives([archive], self.natives)
+        target = self.natives / "org/example/native.dll"
+        target.unlink()
+        outside = self.root / "outside.dll"
+        outside.write_bytes(b"native-binary-content")
+        try:
+            target.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlinks are unavailable on this runner.")
+        with self.assertRaisesRegex(ValueError, "symbolic link"):
+            verify_cached_native_archives([artifact], self.libraries, self.natives)
+
+    def test_extraction_prunes_stale_files_and_readiness_marker(self):
+        (self.natives / "stale.dll").write_bytes(b"stale")
+        (self.natives / ".voidex-ready").write_text(
+            "no native archives required", encoding="utf-8"
+        )
+        archive, _ = self.make_native_artifact()
+        extract_native_archives([archive], self.natives)
+        self.assertTrue((self.natives / "org/example/native.dll").is_file())
+        self.assertFalse((self.natives / "stale.dll").exists())
+        self.assertFalse((self.natives / ".voidex-ready").exists())
 
 
 class JavaDiscoveryTests(unittest.TestCase):
