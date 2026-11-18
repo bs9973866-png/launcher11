@@ -1908,7 +1908,9 @@ def build_launch_plan(version_metadata, *, java_executable, client_jar,
         if not isinstance(legacy, str) or not legacy.strip():
             raise ValueError("Minecraft metadata contains neither modern nor legacy game arguments.")
         try:
-            legacy_tokens = shlex.split(legacy, posix=(os_name != "windows"))
+            # Mojang metadata quotes values containing spaces; remove those quotes on every OS.
+            # Placeholder paths are expanded only after tokenization, so Windows backslashes stay intact.
+            legacy_tokens = shlex.split(legacy, posix=True)
         except ValueError as exc:
             raise ValueError(f"Could not parse legacy Minecraft arguments: {exc}") from exc
         game_args = [_expand_launch_argument(token, placeholders) for token in legacy_tokens]
