@@ -1875,6 +1875,8 @@ def build_launch_plan(version_metadata, *, java_executable, client_jar,
                             else assets_path / "virtual" / "legacy"),
         "auth_uuid": auth["uuid"].replace("-", ""),
         "auth_access_token": auth["access_token"],
+        # Older clients expect token:<access token>:<compact UUID> as one argument.
+        "auth_session": "token:" + auth["access_token"] + ":" + auth["uuid"].replace("-", ""),
         "user_type": auth["user_type"],
         "version_type": str(version_type),
         "natives_directory": str(natives_path),
