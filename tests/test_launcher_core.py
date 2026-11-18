@@ -2307,6 +2307,21 @@ class LaunchPlanTests(unittest.TestCase):
         self.assertEqual(plan["game_arguments"][1], "PlayerOne")
         self.assertEqual(plan["game_arguments"][3], str(self.game.resolve()))
 
+    def test_legacy_auth_session_uses_access_token_and_compact_uuid(self):
+        metadata = dict(self.metadata)
+        metadata.pop("arguments")
+        metadata["minecraftArguments"] = '--session "${auth_session}"'
+        plan = build_launch_plan(
+            metadata, java_executable=self.java, client_jar=self.client,
+            libraries_root=self.libs, natives_directory=self.natives,
+            game_directory=self.game, assets_root=self.assets, auth=self.auth,
+            java_validation={"compatible": True, "path": str(self.java)},
+            os_name="windows", arch="x86_64",
+        )
+        self.assertEqual(
+            plan["game_arguments"],
+            ["--session", "token:explicit-offline-token:12345678123412341234123456789abc"],
+        )
     def test_unresolved_placeholder_and_incomplete_auth_are_rejected(self):
         metadata = dict(self.metadata)
         metadata["arguments"] = {"jvm": [], "game": ["${missing_secret}"]}
