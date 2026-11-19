@@ -12,7 +12,7 @@ from pathlib import Path
 from launcher_core import (ProcessOutputBuffer, SessionLogWriter, fetch_version_metadata, summarize_version_metadata, download_verified_client,
                             download_verified_version_json, download_verified_logging_config, resolve_library_artifacts,
                             download_verified_libraries, resolve_asset_objects, materialize_asset_index, extract_native_archives, verify_cached_native_archives,
-                            discover_java_candidates, validate_java_executable,
+                            discover_java_candidates, validate_java_executable, required_java_major,
                             build_launch_plan, verify_cached_asset_objects, verify_cached_version_json,
                             install_temurin_runtime, search_modrinth_mods,
                             fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod,
@@ -830,7 +830,7 @@ class LaunchCheckWorker(QThread):
                     raise ValueError("Asset index SHA-1 mismatch; install assets again.")
             asset_verification = verify_cached_asset_objects(asset_index_path, objects_root)
 
-            expected_java = (metadata.get("javaVersion") or {}).get("majorVersion")
+            expected_java = required_java_major(metadata)
             java_candidates = [Path(self.java_executable)] if self.java_executable else discover_java_candidates()
             java_result = None
             errors = []
