@@ -12,7 +12,7 @@ import subprocess
 import urllib.request
 
 from launcher_core import (ProcessOutputBuffer, SessionLogWriter, download_verified_client, download_verified_logging_config, download_verified_library, download_verified_libraries, download_verified_version_json,
-                           resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata,
+                           resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata, required_java_major,
                            extract_native_archives, verify_cached_native_archives, discover_java_candidates, validate_java_executable,
                            build_minecraft_classpath, build_launch_plan,
                            verify_cached_asset_objects, materialize_asset_index, verify_cached_version_json, safe_extract_temurin_zip,
@@ -64,10 +64,24 @@ class VersionMetadataTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize_version_metadata(data)
 
-    def test_java_requirement_is_optional(self):
+    def test_legacy_metadata_defaults_to_java_8(self):
         data = sample_metadata()
         data.pop("javaVersion")
-        self.assertIsNone(summarize_version_metadata(data)["java_major"])
+        self.assertEqual(required_java_major(data), 8)
+        self.assertEqual(summarize_version_metadata(data)["java_major"], 8)
+
+    def test_explicit_java_requirement_is_preserved(self):
+        data = sample_metadata()
+        data["javaVersion"] = {"majorVersion": 17}
+        self.assertEqual(required_java_major(data), 17)
+
+    def test_rejects_malformed_explicit_java_requirement(self):
+        for value in ("21", {}, {"majorVersion": True}, {"majorVersion": 0}):
+            data = sample_metadata()
+            data["javaVersion"] = value
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    required_java_major(data)
 
 
 class FakeResponse:
