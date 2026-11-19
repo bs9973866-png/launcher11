@@ -129,6 +129,26 @@ def fetch_version_metadata(metadata_url: str, timeout: int = 20) -> dict:
     return payload
 
 
+def required_java_major(version_metadata: dict) -> int:
+    """Return the required Java major, defaulting legacy metadata to Java 8.
+
+    Mojang's older version JSON documents predate the javaVersion field.
+    Those releases use the Java 8 baseline; malformed explicit requirements
+    are rejected rather than silently falling back.
+    """
+    if not isinstance(version_metadata, dict):
+        raise ValueError("Invalid version metadata document.")
+    java = version_metadata.get("javaVersion")
+    if java is None:
+        return 8
+    if not isinstance(java, dict):
+        raise ValueError("Version metadata contains an invalid Java version requirement.")
+    major = java.get("majorVersion")
+    if not isinstance(major, int) or isinstance(major, bool) or major < 1:
+        raise ValueError("Version metadata contains an invalid Java major version.")
+    return major
+
+
 def summarize_version_metadata(metadata: dict) -> dict:
     """Validate essential client download metadata and return a safe summary."""
     if not isinstance(metadata, dict):
@@ -148,10 +168,7 @@ def summarize_version_metadata(metadata: dict) -> dict:
     if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
         raise ValueError("Client JAR metadata contains an invalid file size.")
 
-    java = metadata.get("javaVersion")
-    major = java.get("majorVersion") if isinstance(java, dict) else None
-    if major is not None and (not isinstance(major, int) or isinstance(major, bool) or major < 1):
-        raise ValueError("Version metadata contains an invalid Java major version.")
+    major = required_java_major(metadata)
 
     return {
         "java_major": major,
@@ -1828,7 +1845,7 @@ def build_launch_plan(version_metadata, *, java_executable, client_jar,
                                          for key in required_auth):
         raise ValueError("Account session is incomplete; authenticate or provide an explicit offline session.")
 
-    java_major = (version_metadata.get("javaVersion") or {}).get("majorVersion")
+    java_major = required_java_major(version_metadata)
     validation = java_validation or validate_java_executable(java_executable, java_major)
     if not validation.get("compatible", False):
         raise ValueError(f"Selected Java runtime does not match required Java {java_major}.")
