@@ -2854,7 +2854,7 @@ class MainWindow(QMainWindow):
         else:
             message = (
                 f"Java {result['version']} does not match the selected Minecraft version requirement "
-                f"(requires {result['expected_major']}+)."
+                f"(requires Java {result['expected_major']} exactly)."
             )
         self.java_status.setText(message)
         self.log(message)

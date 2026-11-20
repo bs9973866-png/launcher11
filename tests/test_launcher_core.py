@@ -14,7 +14,7 @@ import urllib.request
 from launcher_core import (ProcessOutputBuffer, SessionLogWriter, download_verified_client, download_verified_logging_config, download_verified_library, download_verified_libraries, download_verified_version_json,
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata, required_java_major,
                            extract_native_archives, verify_cached_native_archives, discover_java_candidates, validate_java_executable,
-                           build_minecraft_classpath, build_launch_plan,
+                           build_minecraft_classpath, build_launch_plan, validate_extra_jvm_arguments,
                            verify_cached_asset_objects, materialize_asset_index, verify_cached_version_json, safe_extract_temurin_zip,
                            _fetch_temurin_asset, install_temurin_runtime,
                            search_modrinth_mods, fetch_modrinth_compatible_version,
@@ -2448,6 +2448,46 @@ class LaunchPlanTests(unittest.TestCase):
         config_path.write_bytes(b"<tampered/>")
         with self.assertRaisesRegex(ValueError, "size mismatch|SHA-1 mismatch"):
             build_launch_plan(metadata, logging_config_path=config_path, **kwargs)
+
+    def test_safe_extra_jvm_tuning_flags_are_preserved(self):
+        flags = ["-XX:+UseG1GC", "-XX:MaxGCPauseMillis=100", "-Dfile.encoding=UTF-8"]
+        plan = build_launch_plan(
+            self.metadata, java_executable=self.java, client_jar=self.client,
+            libraries_root=self.libs, natives_directory=self.natives,
+            game_directory=self.game, assets_root=self.assets, auth=self.auth,
+            java_validation={"compatible": True, "path": str(self.java)},
+            os_name="windows", arch="x86_64", jvm_arguments=flags,
+        )
+        for flag in flags:
+            self.assertIn(flag, plan["jvm_arguments"])
+
+    def test_extra_jvm_arguments_cannot_override_launcher_managed_options(self):
+        blocked = (
+            "-Xms2G", "-Xmx16G", "-cp", "-classpath", "--class-path",
+            "--class-path=C:\\other.jar",
+            "-Djava.library.path=C:\\native",
+            "-Dlog4j.configurationFile=file:///tmp/unverified.xml",
+        )
+        for argument in blocked:
+            with self.subTest(argument=argument):
+                with self.assertRaisesRegex(ValueError, "managed by VOIDEX"):
+                    build_launch_plan(
+                        self.metadata, java_executable=self.java, client_jar=self.client,
+                        libraries_root=self.libs, natives_directory=self.natives,
+                        game_directory=self.game, assets_root=self.assets, auth=self.auth,
+                        java_validation={"compatible": True, "path": str(self.java)},
+                        os_name="windows", arch="x86_64", jvm_arguments=[argument],
+                    )
+
+    def test_extra_jvm_arguments_reject_launch_mode_switches_and_invalid_values(self):
+        for argument in ("-jar", "-m", "--module=com.example/app.Main"):
+            with self.subTest(argument=argument):
+                with self.assertRaisesRegex(ValueError, "launch mode"):
+                    validate_extra_jvm_arguments([argument])
+        for arguments in (None, "not-a-list", [""], [None], ["-Dname=bad\x00value"], ["-Dname=bad\nvalue"]):
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(ValueError):
+                    validate_extra_jvm_arguments(arguments)
 
     def test_java_mismatch_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "does not match"):

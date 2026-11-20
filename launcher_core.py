@@ -1823,6 +1823,45 @@ def build_minecraft_classpath(version_metadata, client_jar, libraries_root,
     return separator.join(classpath_items)
 
 
+def validate_extra_jvm_arguments(arguments):
+    """Reject user flags that conflict with arguments owned by the launcher.
+
+    Heap sizing is controlled by the RAM selector. The launcher also owns the
+    classpath, native-library directory and verified Log4j2 configuration.
+    Other JVM tuning flags remain available to the user.
+    """
+    if not isinstance(arguments, (list, tuple)):
+        raise ValueError("Additional JVM arguments must be a list or tuple of strings.")
+
+    managed_exact = {
+        "-cp", "-classpath", "--class-path",
+        "-jar", "-m", "--module",
+    }
+    managed_prefixes = (
+        "-xms", "-xmx",
+        "-djava.library.path=", "-dlog4j.configurationfile=",
+        "--class-path=", "--module=",
+    )
+    validated = []
+    for argument in arguments:
+        if (not isinstance(argument, str) or not argument
+                or "\x00" in argument or "\r" in argument or "\n" in argument):
+            raise ValueError("Additional JVM arguments must be non-empty single-line strings without NUL bytes.")
+        normalized = argument.strip().lower()
+        if normalized in managed_exact or normalized.startswith(managed_prefixes):
+            if normalized in {"-jar", "-m", "--module"} or normalized.startswith("--module="):
+                raise ValueError("Additional JVM arguments cannot change the Java launch mode managed by VOIDEX.")
+            raise ValueError(
+                f"JVM argument {argument!r} is managed by VOIDEX settings and cannot be overridden."
+            )
+        if normalized in {"-djava.library.path", "-dlog4j.configurationfile"}:
+            raise ValueError(
+                f"JVM argument {argument!r} is managed by VOIDEX settings and cannot be overridden."
+            )
+        validated.append(argument)
+    return validated
+
+
 def build_launch_plan(version_metadata, *, java_executable, client_jar,
                       libraries_root, natives_directory, game_directory,
                       assets_root, auth, java_validation=None, jvm_arguments=None,
@@ -1933,9 +1972,7 @@ def build_launch_plan(version_metadata, *, java_executable, client_jar,
         game_args = [_expand_launch_argument(token, placeholders) for token in legacy_tokens]
         jvm_args = []
 
-    extra_jvm = jvm_arguments or []
-    if not isinstance(extra_jvm, (list, tuple)) or any(not isinstance(arg, str) for arg in extra_jvm):
-        raise ValueError("Additional JVM arguments must be a list of strings.")
+    extra_jvm = [] if jvm_arguments is None else validate_extra_jvm_arguments(jvm_arguments)
     jvm_args.extend(extra_jvm)
     logging_descriptor = _validated_logging_config(version_metadata.get("logging"))
     if logging_descriptor is not None:
