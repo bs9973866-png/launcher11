@@ -13,7 +13,7 @@ from launcher_core import (ProcessOutputBuffer, SessionLogWriter, fetch_version_
                             download_verified_version_json, download_verified_logging_config, resolve_library_artifacts,
                             download_verified_libraries, resolve_asset_objects, materialize_asset_index, extract_native_archives, verify_cached_native_archives,
                             discover_java_candidates, validate_java_executable, required_java_major,
-                            build_launch_plan, verify_cached_asset_objects, verify_cached_version_json,
+                            build_launch_plan, shutdown_block_reason, verify_cached_asset_objects, verify_cached_version_json,
                             install_temurin_runtime, search_modrinth_mods,
                             fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod,
                             fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata,
@@ -59,6 +59,18 @@ PROFILES = {
     "High-end PC": {"ram": 6144, "renderer": "Performance", "jvm": "-XX:+UseG1GC -XX:+ParallelRefProcEnabled"},
 }
 MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+
+
+BACKGROUND_WORKER_ATTRIBUTES = (
+    "manifest_worker", "metadata_worker", "download_worker",
+    "version_json_worker", "library_worker", "asset_worker",
+    "native_worker", "full_install_worker", "java_worker",
+    "launch_worker", "fabric_versions_worker", "forge_versions_worker",
+    "forge_install_worker", "neoforge_versions_worker", "neoforge_install_worker",
+    "quilt_versions_worker", "quilt_install_worker", "modpack_import_worker",
+    "fabric_install_worker", "modrinth_search_worker", "modrinth_install_worker",
+    "java_install_worker",
+)
 
 
 def offline_uuid(username: str) -> str:
@@ -910,6 +922,7 @@ class MainWindow(QMainWindow):
         self.java_worker = None
         self.launch_worker = None
         self.minecraft_process = None
+        self._close_after_minecraft = False
         self.session_log = None
         self.stdout_buffer = None
         self.stderr_buffer = None
@@ -2988,16 +3001,23 @@ class MainWindow(QMainWindow):
                     )
 
     def _minecraft_process_error(self, error):
-        if not self.minecraft_process:
+        process = self.minecraft_process
+        if process is None:
             return
-        self.launch_status.setText(f"Minecraft process error: {self.minecraft_process.errorString()}")
-        self.log(f"Java process error: {self.minecraft_process.errorString()}")
-        if self.minecraft_process.state() == QProcess.ProcessState.NotRunning:
+        error_text = process.errorString()
+        self.launch_status.setText(f"Minecraft process error: {error_text}")
+        self.log(f"Java process error: {error_text}")
+        if process.state() == QProcess.ProcessState.NotRunning:
             self.stop_button.setEnabled(False)
             self.launch_button.setEnabled(True)
             if error == QProcess.ProcessError.FailedToStart:
+                self._minecraft_stdout()
+                self._minecraft_stderr()
                 self._flush_minecraft_output()
                 self._close_session_log()
+                self.minecraft_process = None
+                if self._close_after_minecraft:
+                    QTimer.singleShot(0, self.close)
 
     def _minecraft_process_finished(self, exit_code, exit_status):
         self._minecraft_stdout()
@@ -3009,11 +3029,15 @@ class MainWindow(QMainWindow):
         self.log(f"Minecraft process finished: exit code {exit_code}, status {exit_status}.")
         self._close_session_log()
         self.minecraft_process = None
+        if self._close_after_minecraft:
+            QTimer.singleShot(0, self.close)
 
     def stop_minecraft(self):
         process = self.minecraft_process
         if not process or process.state() == QProcess.ProcessState.NotRunning:
             return
+        self.stop_button.setEnabled(False)
+        self.launch_status.setText("Stopping Minecraft...")
         self.log("Sending terminate signal to Minecraft.")
         process.terminate()
         QTimer.singleShot(
@@ -3068,6 +3092,65 @@ class MainWindow(QMainWindow):
         self.effects.setCurrentText(self.settings.value("effects", "Disabled (recommended)"))
         self.account_source.setCurrentText(self.settings.value("account_source", "Offline"))
         self.player_name.setText(self.settings.value("nickname", ""))
+
+    def closeEvent(self, event):
+        active_workers = []
+        for attribute in BACKGROUND_WORKER_ATTRIBUTES:
+            worker = getattr(self, attribute, None)
+            if worker is not None and worker.isRunning():
+                active_workers.append(attribute)
+
+        process = self.minecraft_process
+        process_running = bool(
+            process is not None
+            and process.state() != QProcess.ProcessState.NotRunning
+        )
+        reason = shutdown_block_reason(active_workers, process_running)
+
+        if reason and reason["kind"] == "workers":
+            labels = ", ".join(name.removesuffix("_worker").replace("_", " ")
+                               for name in reason["names"])
+            QMessageBox.information(
+                self, "VOIDEX is busy",
+                "Background tasks are still running: "
+                + labels
+                + ". Wait for them to finish before closing VOIDEX."
+            )
+            event.ignore()
+            return
+
+        if reason and reason["kind"] == "minecraft":
+            if not self._close_after_minecraft:
+                answer = QMessageBox.question(
+                    self,
+                    "Minecraft is running",
+                    "Stop Minecraft and close VOIDEX? The game will receive a "
+                    "graceful stop request; if it does not exit within 3 seconds, "
+                    "VOIDEX will force-stop it.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    event.ignore()
+                    return
+                self._close_after_minecraft = True
+                self.log("Window close requested; waiting for Minecraft to stop.")
+                self.stop_minecraft()
+            event.ignore()
+            return
+
+        if process is not None:
+            self._minecraft_stdout()
+            self._minecraft_stderr()
+            self._flush_minecraft_output()
+            self._close_session_log()
+            self.minecraft_process = None
+
+        self._close_after_minecraft = False
+        self._save_settings()
+        self.settings.sync()
+        self._close_session_log()
+        event.accept()
 
     def log(self, message):
         if hasattr(self, "console"):
