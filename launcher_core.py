@@ -47,6 +47,26 @@ class ProcessOutputBuffer:
         return lines
 
 
+def shutdown_block_reason(active_worker_names, minecraft_running):
+    """Describe why the launcher window must defer closing.
+
+    Background QThreads take precedence because destroying their parent window
+    while they are active is unsafe. A running Minecraft process is handled
+    separately by the UI's graceful-stop flow.
+    """
+    if not isinstance(active_worker_names, (list, tuple, set)):
+        raise ValueError("Active worker names must be a list, tuple or set.")
+    names = tuple(
+        name for name in active_worker_names
+        if isinstance(name, str) and name.strip()
+    )
+    if names:
+        return {"kind": "workers", "names": names}
+    if minecraft_running:
+        return {"kind": "minecraft", "names": ()}
+    return None
+
+
 class SessionLogWriter:
     """Create an exclusive, bounded UTF-8 log file for one Minecraft session."""
 
