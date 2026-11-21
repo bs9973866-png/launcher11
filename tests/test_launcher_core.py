@@ -14,7 +14,7 @@ import urllib.request
 from launcher_core import (ProcessOutputBuffer, SessionLogWriter, download_verified_client, download_verified_logging_config, download_verified_library, download_verified_libraries, download_verified_version_json,
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata, required_java_major,
                            extract_native_archives, verify_cached_native_archives, discover_java_candidates, validate_java_executable,
-                           build_minecraft_classpath, build_launch_plan, validate_extra_jvm_arguments,
+                           build_minecraft_classpath, build_launch_plan, validate_extra_jvm_arguments, shutdown_block_reason,
                            verify_cached_asset_objects, materialize_asset_index, verify_cached_version_json, safe_extract_temurin_zip,
                            _fetch_temurin_asset, install_temurin_runtime,
                            search_modrinth_mods, fetch_modrinth_compatible_version,
@@ -35,6 +35,30 @@ def sample_metadata():
         "assetIndex": {"id": "17"},
         "libraries": [{}, {}],
     }
+
+
+class ShutdownPolicyTests(unittest.TestCase):
+    def test_background_workers_block_shutdown_before_process_prompt(self):
+        result = shutdown_block_reason(
+            ["asset_worker", "launch_worker"], minecraft_running=True
+        )
+        self.assertEqual(result, {
+            "kind": "workers",
+            "names": ("asset_worker", "launch_worker"),
+        })
+
+    def test_running_minecraft_requires_graceful_stop_flow(self):
+        self.assertEqual(
+            shutdown_block_reason([], minecraft_running=True),
+            {"kind": "minecraft", "names": ()},
+        )
+
+    def test_shutdown_is_allowed_when_no_work_is_active(self):
+        self.assertIsNone(shutdown_block_reason([], minecraft_running=False))
+
+    def test_invalid_worker_collection_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "list, tuple or set"):
+            shutdown_block_reason(None, minecraft_running=False)
 
 
 class VersionMetadataTests(unittest.TestCase):
