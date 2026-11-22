@@ -22,6 +22,7 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urlencode, urlparse, quote
 
 MANIFEST_HOST = "piston-meta.mojang.com"
+VERSION_METADATA_HOSTS = {MANIFEST_HOST, "launchermeta.mojang.com"}
 MAX_VERSION_MANIFEST_BYTES = 16 * 1024 * 1024
 _VERSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -145,7 +146,7 @@ def _trusted_mojang_metadata_url(value):
         return False
     return (
         parsed.scheme == "https"
-        and parsed.hostname == MANIFEST_HOST
+        and parsed.hostname in VERSION_METADATA_HOSTS
         and parsed.username is None
         and parsed.password is None
         and parsed.fragment == ""
@@ -156,8 +157,9 @@ def _trusted_mojang_metadata_url(value):
 
 def fetch_version_manifest(manifest_url, timeout=20, opener=None):
     """Fetch and validate the official Mojang version catalog with bounded input."""
-    if not _trusted_mojang_metadata_url(manifest_url):
-        raise ValueError("Version manifest URL must use Mojang's trusted HTTPS metadata host.")
+    if (not _trusted_mojang_metadata_url(manifest_url)
+            or urlparse(manifest_url).hostname != MANIFEST_HOST):
+        raise ValueError("Version manifest URL must use Mojang's official manifest HTTPS host.")
     request = urllib.request.Request(
         manifest_url, headers={"User-Agent": "VOIDEX-Launcher/1.0"}
     )
@@ -295,7 +297,7 @@ class MojangRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 class MojangMetadataRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Keep version metadata redirects on Mojang's exact HTTPS metadata origin."""
+    """Keep version metadata redirects on Mojang's official HTTPS metadata hosts."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if not _trusted_mojang_metadata_url(newurl):
@@ -512,7 +514,6 @@ def download_verified_logging_config(logging_metadata, assets_root,
                 pass
 
 
-VERSION_METADATA_HOSTS = {MANIFEST_HOST}
 MAX_VERSION_JSON_BYTES = 16 * 1024 * 1024
 
 
