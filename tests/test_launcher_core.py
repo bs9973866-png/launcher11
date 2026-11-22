@@ -78,6 +78,23 @@ class MojangManifestFetchTests(unittest.TestCase):
                 opener=opener,
             )
 
+    def test_manifest_accepts_legacy_mojang_metadata_host(self):
+        payload = json.dumps(self._manifest_payload(
+            "https://launchermeta.mojang.com/mc/game/example/1.5.2.json"
+        )).encode("utf-8")
+        opener = Mock()
+        opener.open.return_value = io.BytesIO(payload)
+
+        result = fetch_version_manifest(
+            "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+            opener=opener,
+        )
+
+        self.assertEqual(
+            result["versions"][0]["url"],
+            "https://launchermeta.mojang.com/mc/game/example/1.5.2.json",
+        )
+
     def test_manifest_rejects_unsafe_or_duplicate_version_ids(self):
         document = self._manifest_payload()
         document["versions"].append(dict(document["versions"][0], id="../outside"))
@@ -129,6 +146,32 @@ class MojangManifestFetchTests(unittest.TestCase):
         )
 
         self.assertEqual(result["id"], "1.21.11")
+
+    def test_fetch_version_metadata_accepts_legacy_mojang_host(self):
+        payload = json.dumps({"id": "1.5.2", "mainClass": "net.minecraft.launchwrapper.Launch"}).encode("utf-8")
+        opener = Mock()
+        opener.open.return_value = io.BytesIO(payload)
+
+        result = fetch_version_metadata(
+            "https://launchermeta.mojang.com/mc/game/example/1.5.2.json",
+            opener=opener,
+        )
+
+        self.assertEqual(result["id"], "1.5.2")
+
+    def test_metadata_redirect_handler_allows_legacy_mojang_host(self):
+        handler = MojangMetadataRedirectHandler()
+        request = urllib.request.Request(
+            "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+        )
+        redirected = handler.redirect_request(
+            request, None, 302, "Found", {},
+            "https://launchermeta.mojang.com/mc/game/example/1.5.2.json",
+        )
+        self.assertEqual(
+            redirected.full_url,
+            "https://launchermeta.mojang.com/mc/game/example/1.5.2.json",
+        )
 
     def test_fetch_version_metadata_rejects_non_mojang_urls(self):
         with self.assertRaisesRegex(ValueError, "trusted HTTPS metadata host"):
@@ -431,6 +474,18 @@ class VersionJsonCacheTests(unittest.TestCase):
                     Path(directory) / "version.json", opener=opener
                 )
             opener.open.assert_not_called()
+
+    def test_downloads_version_json_from_legacy_mojang_metadata_host(self):
+        with tempfile.TemporaryDirectory() as directory:
+            opener = Mock()
+            opener.open.return_value = FakeResponse(self.payload)
+            target = Path(directory) / "1.5.2.json"
+            result = download_verified_version_json(
+                "https://launchermeta.mojang.com/mc/game/example/1.5.2.json",
+                self.sha1, target, opener=opener,
+            )
+            self.assertEqual(result, target)
+            self.assertEqual(target.read_bytes(), self.payload)
 
     def test_rejects_invalid_json_without_replacing_target(self):
         with tempfile.TemporaryDirectory() as directory:
