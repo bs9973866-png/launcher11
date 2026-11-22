@@ -12,6 +12,7 @@ import subprocess
 import urllib.request
 
 from launcher_core import (ProcessOutputBuffer, SessionLogWriter, download_verified_client, download_verified_logging_config, download_verified_library, download_verified_libraries, download_verified_version_json,
+                           fetch_version_manifest, fetch_version_metadata, MojangMetadataRedirectHandler,
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata, required_java_major,
                            extract_native_archives, verify_cached_native_archives, discover_java_candidates, validate_java_executable,
                            build_minecraft_classpath, build_launch_plan, validate_extra_jvm_arguments, shutdown_block_reason,
@@ -35,6 +36,103 @@ def sample_metadata():
         "assetIndex": {"id": "17"},
         "libraries": [{}, {}],
     }
+
+
+class MojangManifestFetchTests(unittest.TestCase):
+    def _manifest_payload(self, metadata_url="https://piston-meta.mojang.com/v1/packages/test/1.21.11.json"):
+        return {
+            "latest": {"release": "1.21.11", "snapshot": "1.21.11"},
+            "versions": [{
+                "id": "1.21.11",
+                "type": "release",
+                "url": metadata_url,
+                "sha1": "a" * 40,
+            }],
+        }
+
+    def test_fetch_version_manifest_validates_and_returns_catalog(self):
+        payload = json.dumps(self._manifest_payload()).encode("utf-8")
+        opener = Mock()
+        opener.open.return_value = io.BytesIO(payload)
+
+        result = fetch_version_manifest(
+            "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+            opener=opener,
+        )
+
+        self.assertEqual(result["latest"]["release"], "1.21.11")
+        self.assertEqual(result["versions"][0]["id"], "1.21.11")
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
+
+    def test_manifest_rejects_untrusted_version_metadata_url(self):
+        payload = json.dumps(self._manifest_payload(
+            "https://example.invalid/1.21.11.json"
+        )).encode("utf-8")
+        opener = Mock()
+        opener.open.return_value = io.BytesIO(payload)
+
+        with self.assertRaisesRegex(ValueError, "URL is not trusted"):
+            fetch_version_manifest(
+                "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+                opener=opener,
+            )
+
+    def test_manifest_rejects_unsafe_or_duplicate_version_ids(self):
+        document = self._manifest_payload()
+        document["versions"].append(dict(document["versions"][0], id="../outside"))
+        opener = Mock()
+        opener.open.return_value = io.BytesIO(json.dumps(document).encode("utf-8"))
+
+        with self.assertRaisesRegex(ValueError, "invalid or duplicate version ID"):
+            fetch_version_manifest(
+                "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+                opener=opener,
+            )
+
+    def test_manifest_response_is_size_limited(self):
+        opener = Mock()
+        opener.open.return_value = io.BytesIO(b"x" * 11)
+
+        with patch("launcher_core.MAX_VERSION_MANIFEST_BYTES", 10):
+            with self.assertRaisesRegex(ValueError, "maximum allowed size"):
+                fetch_version_manifest(
+                    "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+                    opener=opener,
+                )
+
+    def test_manifest_redirect_handler_rejects_external_and_http_redirects(self):
+        handler = MojangMetadataRedirectHandler()
+        request = urllib.request.Request(
+            "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+        )
+        for target in (
+            "https://example.invalid/manifest.json",
+            "http://piston-meta.mojang.com/manifest.json",
+            "https://user@piston-meta.mojang.com/manifest.json",
+            "https://piston-meta.mojang.com:444/manifest.json",
+        ):
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(ValueError, "untrusted host"):
+                    handler.redirect_request(
+                        request, None, 302, "Found", {}, target
+                    )
+
+    def test_fetch_version_metadata_uses_bounded_mojang_response(self):
+        payload = json.dumps({"id": "1.21.11", "mainClass": "net.minecraft.client.main.Main"}).encode("utf-8")
+        opener = Mock()
+        opener.open.return_value = io.BytesIO(payload)
+
+        result = fetch_version_metadata(
+            "https://piston-meta.mojang.com/v1/packages/test/1.21.11.json",
+            opener=opener,
+        )
+
+        self.assertEqual(result["id"], "1.21.11")
+
+    def test_fetch_version_metadata_rejects_non_mojang_urls(self):
+        with self.assertRaisesRegex(ValueError, "trusted HTTPS metadata host"):
+            fetch_version_metadata("https://example.invalid/version.json")
 
 
 class ShutdownPolicyTests(unittest.TestCase):
