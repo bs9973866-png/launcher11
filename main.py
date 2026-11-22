@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from launcher_core import (ProcessOutputBuffer, SessionLogWriter, fetch_version_metadata, summarize_version_metadata, download_verified_client,
+from launcher_core import (ProcessOutputBuffer, SessionLogWriter, fetch_version_manifest, fetch_version_metadata, summarize_version_metadata, download_verified_client,
                             download_verified_version_json, download_verified_logging_config, resolve_library_artifacts,
                             download_verified_libraries, resolve_asset_objects, materialize_asset_index, extract_native_archives, verify_cached_native_archives,
                             discover_java_candidates, validate_java_executable, required_java_major,
@@ -342,13 +342,7 @@ class ManifestWorker(QThread):
 
     def run(self):
         try:
-            request = urllib.request.Request(
-                MANIFEST_URL,
-                headers={"User-Agent": "VOIDEX-Launcher/0.2"}
-            )
-            with urllib.request.urlopen(request, timeout=20) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            self.loaded.emit(data)
+            self.loaded.emit(fetch_version_manifest(MANIFEST_URL))
         except Exception as exc:
             self.failed.emit(str(exc))
 
