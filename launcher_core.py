@@ -22,6 +22,8 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urlencode, urlparse, quote
 
 MANIFEST_HOST = "piston-meta.mojang.com"
+MAX_VERSION_MANIFEST_BYTES = 16 * 1024 * 1024
+_VERSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
@@ -134,19 +136,95 @@ class SessionLogWriter:
 
 
 
-def fetch_version_metadata(metadata_url: str, timeout: int = 20) -> dict:
-    """Fetch a version JSON document from Mojang's metadata host only."""
-    parsed = urlparse(metadata_url)
-    if parsed.scheme != "https" or parsed.hostname != MANIFEST_HOST:
-        raise ValueError("Version metadata URL must use Mojang's HTTPS metadata host.")
-    request = urllib.request.Request(
-        metadata_url, headers={"User-Agent": "VOIDEX-Launcher/0.3"}
+def _trusted_mojang_metadata_url(value):
+    """Return whether a metadata URL stays on Mojang's HTTPS metadata origin."""
+    parsed = urlparse(value if isinstance(value, str) else "")
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == MANIFEST_HOST
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.fragment == ""
+        and port in (None, 443)
+        and bool(parsed.path)
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    if not isinstance(payload, dict):
+
+
+def fetch_version_manifest(manifest_url, timeout=20, opener=None):
+    """Fetch and validate the official Mojang version catalog with bounded input."""
+    if not _trusted_mojang_metadata_url(manifest_url):
+        raise ValueError("Version manifest URL must use Mojang's trusted HTTPS metadata host.")
+    request = urllib.request.Request(
+        manifest_url, headers={"User-Agent": "VOIDEX-Launcher/1.0"}
+    )
+    if opener is None:
+        opener = urllib.request.build_opener(MojangMetadataRedirectHandler())
+    with opener.open(request, timeout=timeout) as response:
+        payload = response.read(MAX_VERSION_MANIFEST_BYTES + 1)
+    if len(payload) > MAX_VERSION_MANIFEST_BYTES:
+        raise ValueError("Mojang version manifest exceeds the maximum allowed size.")
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Mojang version manifest is not valid UTF-8 JSON.") from exc
+    if not isinstance(document, dict):
+        raise ValueError("Mojang version manifest must be a JSON object.")
+    latest = document.get("latest")
+    versions = document.get("versions")
+    if (not isinstance(latest, dict)
+            or any(not isinstance(latest.get(key), str) or not latest[key]
+                   for key in ("release", "snapshot"))
+            or not isinstance(versions, list)
+            or not versions
+            or len(versions) > 10000):
+        raise ValueError("Mojang version manifest has an invalid latest section or version list.")
+
+    seen_ids = set()
+    for entry in versions:
+        if not isinstance(entry, dict):
+            raise ValueError("Mojang version manifest contains an invalid version entry.")
+        version_id = entry.get("id")
+        version_type = entry.get("type")
+        sha1 = entry.get("sha1")
+        if (not isinstance(version_id, str) or not _VERSION_ID_RE.fullmatch(version_id)
+                or version_id in seen_ids):
+            raise ValueError("Mojang version manifest contains an invalid or duplicate version ID.")
+        if not isinstance(version_type, str) or not version_type or len(version_type) > 32:
+            raise ValueError("Mojang version manifest contains an invalid version type.")
+        if not isinstance(sha1, str) or not _SHA1_RE.fullmatch(sha1):
+            raise ValueError(f"Mojang version manifest contains an invalid SHA-1 for {version_id}.")
+        if not _trusted_mojang_metadata_url(entry.get("url")):
+            raise ValueError(f"Mojang version metadata URL is not trusted for {version_id}.")
+        seen_ids.add(version_id)
+    if latest["release"] not in seen_ids or latest["snapshot"] not in seen_ids:
+        raise ValueError("Mojang latest-version references are not present in the version catalog.")
+    return document
+
+
+def fetch_version_metadata(metadata_url: str, timeout: int = 20, opener=None) -> dict:
+    """Fetch a bounded version JSON document using Mojang-only HTTPS redirects."""
+    if not _trusted_mojang_metadata_url(metadata_url):
+        raise ValueError("Version metadata URL must use Mojang's trusted HTTPS metadata host.")
+    request = urllib.request.Request(
+        metadata_url, headers={"User-Agent": "VOIDEX-Launcher/1.0"}
+    )
+    if opener is None:
+        opener = urllib.request.build_opener(MojangMetadataRedirectHandler())
+    with opener.open(request, timeout=timeout) as response:
+        payload = response.read(MAX_VERSION_JSON_BYTES + 1)
+    if len(payload) > MAX_VERSION_JSON_BYTES:
+        raise ValueError("Mojang version metadata exceeds the maximum allowed size.")
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Mojang version metadata is not valid UTF-8 JSON.") from exc
+    if not isinstance(document, dict):
         raise ValueError("Mojang version metadata must be a JSON object.")
-    return payload
+    return document
 
 
 def required_java_major(version_metadata: dict) -> int:
@@ -217,11 +295,10 @@ class MojangRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 class MojangMetadataRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Keep version metadata redirects on Mojang's metadata host."""
+    """Keep version metadata redirects on Mojang's exact HTTPS metadata origin."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        parsed = urlparse(newurl)
-        if parsed.scheme != "https" or parsed.hostname not in VERSION_METADATA_HOSTS:
+        if not _trusted_mojang_metadata_url(newurl):
             raise ValueError("Mojang metadata redirected to an untrusted host.")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
