@@ -1134,6 +1134,52 @@ def materialize_asset_index(asset_index, objects_root, assets_root,
     }
 
 
+
+def resolve_asset_index_reference(version_metadata):
+    """Return a validated Mojang asset-index descriptor, or None when absent."""
+    if not isinstance(version_metadata, dict):
+        raise ValueError("Minecraft version metadata must be a JSON object.")
+    asset_ref = version_metadata.get("assetIndex")
+    if asset_ref is None:
+        return None
+    if not isinstance(asset_ref, dict):
+        raise ValueError("Minecraft asset index metadata must be an object.")
+    index_id = asset_ref.get("id")
+    if not isinstance(index_id, str) or not _ASSET_INDEX_ID_RE.fullmatch(index_id):
+        raise ValueError("Minecraft asset index ID is invalid.")
+    index_url = asset_ref.get("url")
+    if not _trusted_mojang_metadata_url(index_url):
+        raise ValueError("Minecraft asset index URL is not a trusted Mojang metadata URL.")
+    index_sha1 = asset_ref.get("sha1")
+    if not isinstance(index_sha1, str) or not _SHA1_RE.fullmatch(index_sha1):
+        raise ValueError("Minecraft asset index SHA-1 is invalid.")
+    index_size = asset_ref.get("size")
+    if index_size is not None and (
+            not isinstance(index_size, int) or isinstance(index_size, bool) or index_size <= 0):
+        raise ValueError("Minecraft asset index size is invalid.")
+    return dict(asset_ref)
+
+
+def prepare_legacy_asset_directory(assets_root):
+    """Create the empty legacy assets directory used when metadata has no asset index.
+
+    No asset objects are invented or downloaded in this case. The caller can
+    still build a launch plan using the legacy game-assets placeholder.
+    """
+    assets_base = Path(assets_root).expanduser().absolute()
+    target = _ensure_asset_directory(
+        assets_base, assets_base / "virtual" / "legacy"
+    )
+    return {
+        "mode": "legacy-empty",
+        "directory": str(target),
+        "game_assets_directory": str(target),
+        "count": 0,
+        "copied": 0,
+        "reused": 0,
+    }
+
+
 MAX_NATIVE_ARCHIVE_ENTRIES = 20000
 MAX_NATIVE_TOTAL_UNCOMPRESSED = 512 * 1024 * 1024
 MAX_NATIVE_FILE_SIZE = 128 * 1024 * 1024
