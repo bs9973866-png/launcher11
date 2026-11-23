@@ -13,7 +13,7 @@ from launcher_core import (ProcessOutputBuffer, SessionLogWriter, fetch_version_
                             download_verified_version_json, download_verified_logging_config, resolve_library_artifacts,
                             download_verified_libraries, resolve_asset_objects, materialize_asset_index, extract_native_archives, verify_cached_native_archives,
                             discover_java_candidates, validate_java_executable, required_java_major,
-                            build_launch_plan, shutdown_block_reason, verify_cached_asset_objects, verify_cached_version_json,
+                            build_launch_plan, shutdown_block_reason, verify_cached_asset_objects, resolve_asset_index_reference, prepare_legacy_asset_directory, verify_cached_version_json,
                             install_temurin_runtime, search_modrinth_mods,
                             fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod,
                             fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata,
@@ -505,19 +505,21 @@ class AssetInstallWorker(QThread):
             )
             with Path(version_path).open("r", encoding="utf-8") as stream:
                 version_metadata = json.load(stream)
-            asset_ref = version_metadata.get("assetIndex")
-            if not isinstance(asset_ref, dict):
-                raise ValueError("Selected Minecraft version has no asset index metadata.")
-            index_id = asset_ref.get("id")
-            if (not isinstance(index_id, str) or not index_id
-                    or any(not (char.isalnum() or char in "._-") for char in index_id)):
-                raise ValueError("Asset index ID is invalid.")
-            index_url = asset_ref.get("url")
-            index_sha1 = asset_ref.get("sha1")
+            asset_ref = resolve_asset_index_reference(version_metadata)
+            if asset_ref is None:
+                legacy_layout = prepare_legacy_asset_directory(self.assets_root)
+                self.completed.emit({
+                    "index": None,
+                    "count": 0,
+                    "asset_layout": legacy_layout,
+                    "message": "No asset index was published; prepared an empty legacy assets directory.",
+                })
+                return
+            index_id = asset_ref["id"]
             index_path = self.assets_root / "indexes" / f"{index_id}.json"
             self.progress.emit(0, 0, "asset index")
             cached_index = download_verified_version_json(
-                index_url, index_sha1, index_path,
+                asset_ref["url"], asset_ref["sha1"], index_path,
                 progress_callback=lambda done, total: self.progress.emit(done, total, "asset index"),
             )
             with Path(cached_index).open("r", encoding="utf-8") as stream:
@@ -574,9 +576,7 @@ class FullInstallWorker(QThread):
                 progress_callback=lambda done, total: self.progress.emit(done, total, "Log4j2 config"),
             )
 
-            asset_ref = metadata.get("assetIndex")
-            if not isinstance(asset_ref, dict) or not asset_ref.get("id"):
-                raise ValueError("This Minecraft version has no supported asset index.")
+            asset_ref = resolve_asset_index_reference(metadata)
             self.stage.emit("Downloading and verifying Minecraft client")
             summary = summarize_version_metadata(metadata)
             client = download_verified_client(
@@ -599,31 +599,33 @@ class FullInstallWorker(QThread):
             if not any(natives_root.iterdir()):
                 (natives_root / ".voidex-ready").write_text("no native archives required", encoding="utf-8")
 
-            self.stage.emit("Downloading and verifying Minecraft assets")
-            index_id = asset_ref.get("id")
-            if (not isinstance(index_id, str) or not index_id
-                    or any(not (char.isalnum() or char in "._-") for char in index_id)):
-                raise ValueError("Minecraft asset index ID is invalid.")
-            index_path = assets_root / "indexes" / f"{index_id}.json"
-            index_path.parent.mkdir(parents=True, exist_ok=True)
-            cached_index = download_verified_version_json(
-                asset_ref.get("url"), asset_ref.get("sha1"), index_path,
-                progress_callback=lambda done, total: self.progress.emit(done, total, "asset index"),
-            )
-            with Path(cached_index).open("r", encoding="utf-8") as stream:
-                asset_index = json.load(stream)
-            asset_artifacts = resolve_asset_objects(asset_index)
-            asset_paths = download_verified_libraries(
-                asset_artifacts, assets_root / "objects",
-                progress_callback=lambda done, total, path: self.progress.emit(done, total, path),
-            )
-            verification = verify_cached_asset_objects(cached_index, assets_root / "objects")
-
             game_root.mkdir(parents=True, exist_ok=True)
-            asset_materialization = materialize_asset_index(
-                asset_index, assets_root / "objects", assets_root, game_root,
-                index_id, metadata.get("assets"),
-            )
+            if asset_ref is None:
+                self.stage.emit("Preparing legacy assets directory (no asset index in metadata)")
+                asset_paths = []
+                verification = {"count": 0}
+                asset_materialization = prepare_legacy_asset_directory(assets_root)
+            else:
+                self.stage.emit("Downloading and verifying Minecraft assets")
+                index_id = asset_ref["id"]
+                index_path = assets_root / "indexes" / f"{index_id}.json"
+                index_path.parent.mkdir(parents=True, exist_ok=True)
+                cached_index = download_verified_version_json(
+                    asset_ref["url"], asset_ref["sha1"], index_path,
+                    progress_callback=lambda done, total: self.progress.emit(done, total, "asset index"),
+                )
+                with Path(cached_index).open("r", encoding="utf-8") as stream:
+                    asset_index = json.load(stream)
+                asset_artifacts = resolve_asset_objects(asset_index)
+                asset_paths = download_verified_libraries(
+                    asset_artifacts, assets_root / "objects",
+                    progress_callback=lambda done, total, path: self.progress.emit(done, total, path),
+                )
+                verification = verify_cached_asset_objects(cached_index, assets_root / "objects")
+                asset_materialization = materialize_asset_index(
+                    asset_index, assets_root / "objects", assets_root, game_root,
+                    index_id, metadata.get("assets"),
+                )
             self.completed.emit({
                 "version": version_id,
                 "client": str(client),
@@ -820,21 +822,21 @@ class LaunchCheckWorker(QThread):
                 native_artifacts, libraries, natives
             )
 
-            asset_ref = metadata.get("assetIndex") or {}
-            if not isinstance(asset_ref, dict) or not asset_ref.get("id"):
-                raise ValueError("This version has no supported asset index.")
-            asset_index_path = home / "assets" / "indexes" / f"{asset_ref['id']}.json"
+            asset_ref = resolve_asset_index_reference(metadata)
             objects_root = home / "assets" / "objects"
-            if asset_index_path.is_symlink() or not asset_index_path.is_file():
-                raise ValueError("Asset index is missing or unsafe; install assets again.")
-            if asset_ref.get("sha1"):
+            if asset_ref is None:
+                asset_verification = {"count": 0, "index": None}
+            else:
+                asset_index_path = home / "assets" / "indexes" / f"{asset_ref['id']}.json"
+                if asset_index_path.is_symlink() or not asset_index_path.is_file():
+                    raise ValueError("Asset index is missing or unsafe; install assets again.")
                 index_digest = hashlib.sha1()
                 with asset_index_path.open("rb") as stream:
                     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                         index_digest.update(chunk)
                 if index_digest.hexdigest().lower() != asset_ref["sha1"].lower():
                     raise ValueError("Asset index SHA-1 mismatch; install assets again.")
-            asset_verification = verify_cached_asset_objects(asset_index_path, objects_root)
+                asset_verification = verify_cached_asset_objects(asset_index_path, objects_root)
 
             expected_java = required_java_major(metadata)
             java_candidates = [Path(self.java_executable)] if self.java_executable else discover_java_candidates()
@@ -864,10 +866,13 @@ class LaunchCheckWorker(QThread):
             else:
                 game_directory = home / "instances" / self.version_id
             game_directory.mkdir(parents=True, exist_ok=True)
-            asset_materialization = materialize_asset_index(
-                asset_verification["index"], objects_root, home / "assets",
-                game_directory, asset_ref["id"], metadata.get("assets"),
-            )
+            if asset_ref is None:
+                asset_materialization = prepare_legacy_asset_directory(home / "assets")
+            else:
+                asset_materialization = materialize_asset_index(
+                    asset_verification["index"], objects_root, home / "assets",
+                    game_directory, asset_ref["id"], metadata.get("assets"),
+                )
             logging_config_path = download_verified_logging_config(
                 metadata.get("logging"), home / "assets"
             )
