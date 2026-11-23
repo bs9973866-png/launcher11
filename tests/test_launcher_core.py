@@ -16,7 +16,7 @@ from launcher_core import (ProcessOutputBuffer, SessionLogWriter, download_verif
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata, required_java_major,
                            extract_native_archives, verify_cached_native_archives, discover_java_candidates, validate_java_executable,
                            build_minecraft_classpath, build_launch_plan, validate_extra_jvm_arguments, shutdown_block_reason,
-                           verify_cached_asset_objects, materialize_asset_index, verify_cached_version_json, safe_extract_temurin_zip,
+                           verify_cached_asset_objects, materialize_asset_index, resolve_asset_index_reference, prepare_legacy_asset_directory, verify_cached_version_json, safe_extract_temurin_zip,
                            _fetch_temurin_asset, install_temurin_runtime,
                            search_modrinth_mods, fetch_modrinth_compatible_version,
                            download_verified_modrinth_file, list_installed_mods,
@@ -973,6 +973,49 @@ class AssetMaterializationTests(unittest.TestCase):
             materialize_asset_index(
                 index, self.objects, self.assets, self.game, "test"
             )
+
+    def test_asset_index_reference_is_optional_but_validated_when_present(self):
+        self.assertIsNone(resolve_asset_index_reference({"id": "alpha"}))
+        reference = {
+            "id": "pre-1.6",
+            "url": "https://launchermeta.mojang.com/v1/packages/test/pre-1.6.json",
+            "sha1": "a" * 40,
+            "size": 128,
+        }
+        self.assertEqual(resolve_asset_index_reference({"assetIndex": reference}), reference)
+
+    def test_asset_index_reference_rejects_untrusted_or_malformed_metadata(self):
+        invalid_references = (
+            {"id": "../escape", "url": "https://launchermeta.mojang.com/index.json", "sha1": "a" * 40},
+            {"id": "legacy", "url": "https://example.com/index.json", "sha1": "a" * 40},
+            {"id": "legacy", "url": "https://launchermeta.mojang.com/index.json", "sha1": "bad"},
+            {"id": "legacy", "url": "https://launchermeta.mojang.com/index.json", "sha1": "a" * 40, "size": True},
+        )
+        for reference in invalid_references:
+            with self.subTest(reference=reference), self.assertRaises(ValueError):
+                resolve_asset_index_reference({"assetIndex": reference})
+
+    def test_prepare_legacy_asset_directory_creates_reusable_empty_layout(self):
+        first = prepare_legacy_asset_directory(self.assets)
+        second = prepare_legacy_asset_directory(self.assets)
+        expected = (self.assets / "virtual" / "legacy").resolve()
+        self.assertEqual(Path(first["game_assets_directory"]), expected)
+        self.assertEqual(Path(second["directory"]), expected)
+        self.assertEqual(first["mode"], "legacy-empty")
+        self.assertEqual(first["count"], 0)
+        self.assertTrue(expected.is_dir())
+
+    def test_prepare_legacy_asset_directory_rejects_symlinked_root(self):
+        real_assets = self.root / "real-assets"
+        real_assets.mkdir()
+        linked_assets = self.root / "linked-assets"
+        try:
+            linked_assets.symlink_to(real_assets, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("Directory symlinks are unavailable on this runner.")
+        with self.assertRaisesRegex(ValueError, "symbolic-link"):
+            prepare_legacy_asset_directory(linked_assets)
+
 
 
 if __name__ == "__main__":
@@ -2565,6 +2608,28 @@ class LaunchPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan["game_arguments"], ["--assetsDir", str(game_assets.resolve())])
         self.assertEqual(plan["game_assets_directory"], str(game_assets.resolve()))
+
+    def test_missing_asset_index_uses_the_legacy_asset_placeholders(self):
+        metadata = dict(self.metadata)
+        metadata.pop("assetIndex")
+        metadata["arguments"] = {
+            "jvm": [],
+            "game": ["--assetIndex", "${assets_index_name}", "--assetsDir", "${game_assets}"],
+        }
+        legacy_layout = prepare_legacy_asset_directory(self.assets)
+        plan = build_launch_plan(
+            metadata, java_executable=self.java, client_jar=self.client,
+            libraries_root=self.libs, natives_directory=self.natives,
+            game_directory=self.game, assets_root=self.assets, auth=self.auth,
+            java_validation={"compatible": True, "path": str(self.java)},
+            os_name="windows", arch="x86_64",
+            game_assets_directory=legacy_layout["game_assets_directory"],
+        )
+        self.assertEqual(
+            plan["game_arguments"],
+            ["--assetIndex", "legacy", "--assetsDir", legacy_layout["game_assets_directory"]],
+        )
+
 
     def test_logging_configuration_is_verified_and_added_to_jvm_arguments(self):
         metadata = dict(self.metadata)
