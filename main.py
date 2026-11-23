@@ -2364,17 +2364,30 @@ class MainWindow(QMainWindow):
             self.version_status.setText(f"Preparing {current_path}...")
 
     def _full_install_completed(self, result):
-        self.version_status.setText(
-            f"{result['version']} installed: {result['libraries']} libraries, "
-            f"{result['native_archives']} native archives, {result['verified_assets']} assets."
-        )
-        self.launch_status.setText(
-            f"Files for {result['version']} are installed and verified. Press Launch; VOIDEX will validate a compatible Java runtime."
-        )
+        assetless_legacy = result.get("asset_layout", {}).get("mode") == "legacy-empty"
+        if assetless_legacy:
+            self.version_status.setText(
+                f"{result['version']} files prepared: {result['libraries']} libraries, "
+                f"{result['native_archives']} native archives; no asset index was published."
+            )
+            self.launch_status.setText(
+                f"Core files for {result['version']} are verified. Its metadata has no asset index; "
+                "external resources may be unavailable. Press Launch to run Java preflight."
+            )
+        else:
+            self.version_status.setText(
+                f"{result['version']} installed: {result['libraries']} libraries, "
+                f"{result['native_archives']} native archives, {result['verified_assets']} assets."
+            )
+            self.launch_status.setText(
+                f"Files for {result['version']} are installed and verified. Press Launch; VOIDEX will validate a compatible Java runtime."
+            )
         self.log(
             f"Installation complete for {result['version']}: client verified; "
             f"{result['libraries']} libraries; {result['native_files']} native files; "
-            f"{result['verified_assets']} verified asset objects. Game directory: {result['game_directory']}"
+            f"{result['verified_assets']} verified asset objects. "
+            f"Asset layout: {result.get('asset_layout', {}).get('mode', 'unknown')}. "
+            f"Game directory: {result['game_directory']}"
         )
         self.full_install_worker = None
 
@@ -2534,10 +2547,18 @@ class MainWindow(QMainWindow):
 
     def _asset_install_completed(self, result):
         count = result["count"]
-        self.version_status.setText(
-            f"Verified asset objects cached: {count}. Native extraction and game launch are still pending."
-        )
-        self.log(f"Asset stage complete: {count} verified objects cached under .voidex/assets/objects.")
+        if result.get("asset_layout", {}).get("mode") == "legacy-empty":
+            message = (
+                "No asset index was published; prepared an empty legacy assets directory. "
+                "External resources may be unavailable for this version."
+            )
+            self.version_status.setText(message)
+            self.log(message)
+        else:
+            self.version_status.setText(
+                f"Verified asset objects cached: {count}. Native extraction and game launch are still pending."
+            )
+            self.log(f"Asset stage complete: {count} verified objects cached under .voidex/assets/objects.")
         self.asset_worker = None
 
     def _asset_install_failed(self, error):
