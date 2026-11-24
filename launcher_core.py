@@ -42,6 +42,7 @@ class ProcessOutputBuffer:
         self._pending = ""
         self._max_line_chars = max_line_chars
         self._line_truncated = False
+        self._pending_cr = False
 
     def _append_segment(self, segment: str):
         if self._line_truncated:
@@ -67,14 +68,31 @@ class ProcessOutputBuffer:
         if not isinstance(chunk, (bytes, bytearray, memoryview)):
             raise TypeError("Process output chunks must be bytes.")
         decoded = self._decoder.decode(bytes(chunk), final=final)
-        segments = decoded.split("\n")
         lines = []
-        for index, segment in enumerate(segments):
-            self._append_segment(segment)
-            if index < len(segments) - 1:
+        if self._pending_cr:
+            if decoded.startswith("\n"):
                 lines.append(self._finish_line())
-        if final and (self._pending or self._line_truncated):
-            lines.append(self._finish_line())
+                decoded = decoded[1:]
+            elif decoded or final:
+                if decoded:
+                    self._append_segment("\r")
+                self._pending_cr = False
+
+        segments = decoded.split("\n")
+        for index, segment in enumerate(segments):
+            has_newline = index < len(segments) - 1
+            if segment.endswith("\r") and (has_newline or final):
+                segment = segment[:-1]
+            elif not has_newline and not final and segment.endswith("\r"):
+                segment = segment[:-1]
+                self._pending_cr = True
+            self._append_segment(segment)
+            if has_newline:
+                lines.append(self._finish_line())
+        if final:
+            self._pending_cr = False
+            if self._pending or self._line_truncated:
+                lines.append(self._finish_line())
         return lines
 
 

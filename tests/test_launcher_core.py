@@ -2369,6 +2369,19 @@ class ProcessOutputBufferTests(unittest.TestCase):
             ["01234567 … [line truncated]"],
         )
 
+    def test_exact_limit_crlf_is_not_mistaken_for_truncated_output(self):
+        buffer = ProcessOutputBuffer(max_line_chars=8)
+        self.assertEqual(buffer.feed(b"12345678\r"), [])
+        self.assertEqual(buffer.feed(b"\n"), ["12345678"])
+
+    def test_carriage_return_is_counted_if_it_is_not_followed_by_line_feed(self):
+        buffer = ProcessOutputBuffer(max_line_chars=8)
+        self.assertEqual(buffer.feed(b"12345678\r"), [])
+        self.assertEqual(
+            buffer.feed(b"x\n"),
+            ["12345678 … [line truncated]"],
+        )
+
     def test_maximum_line_length_must_be_a_positive_integer(self):
         for value in (0, -1, True, 1.5, "8"):
             with self.subTest(value=value), self.assertRaises(ValueError):
