@@ -29,24 +29,52 @@ _SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 class ProcessOutputBuffer:
-    """Decode arbitrary process byte chunks into complete UTF-8 lines."""
+    """Decode process output into lines while bounding unterminated-line memory."""
 
-    def __init__(self):
+    DEFAULT_MAX_LINE_CHARS = 64 * 1024
+    TRUNCATION_MARKER = " … [line truncated]"
+
+    def __init__(self, max_line_chars: int = DEFAULT_MAX_LINE_CHARS):
+        if (not isinstance(max_line_chars, int) or isinstance(max_line_chars, bool)
+                or max_line_chars < 1):
+            raise ValueError("Maximum process output line length must be a positive integer.")
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._pending = ""
+        self._max_line_chars = max_line_chars
+        self._line_truncated = False
+
+    def _append_segment(self, segment: str):
+        if self._line_truncated:
+            return
+        remaining = self._max_line_chars - len(self._pending)
+        if len(segment) > remaining:
+            self._pending += segment[:remaining]
+            self._line_truncated = True
+        else:
+            self._pending += segment
+
+    def _finish_line(self) -> str:
+        line = self._pending
+        if line.endswith("\r"):
+            line = line[:-1]
+        if self._line_truncated:
+            line += self.TRUNCATION_MARKER
+        self._pending = ""
+        self._line_truncated = False
+        return line
 
     def feed(self, chunk: bytes, final: bool = False) -> list[str]:
         if not isinstance(chunk, (bytes, bytearray, memoryview)):
             raise TypeError("Process output chunks must be bytes.")
-        self._pending += self._decoder.decode(bytes(chunk), final=final)
+        decoded = self._decoder.decode(bytes(chunk), final=final)
+        segments = decoded.split("\n")
         lines = []
-        while "\n" in self._pending:
-            line, self._pending = self._pending.split("\n", 1)
-            lines.append(line[:-1] if line.endswith("\r") else line)
-        if final:
-            if self._pending:
-                lines.append(self._pending[:-1] if self._pending.endswith("\r") else self._pending)
-            self._pending = ""
+        for index, segment in enumerate(segments):
+            self._append_segment(segment)
+            if index < len(segments) - 1:
+                lines.append(self._finish_line())
+        if final and (self._pending or self._line_truncated):
+            lines.append(self._finish_line())
         return lines
 
 

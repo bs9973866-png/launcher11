@@ -2349,6 +2349,32 @@ class ProcessOutputBufferTests(unittest.TestCase):
         self.assertEqual(buffer.feed(b"bad\xff\n", final=True), ["bad�"])
 
 
+    def test_unterminated_output_line_is_bounded_and_marked(self):
+        buffer = ProcessOutputBuffer(max_line_chars=8)
+        self.assertEqual(buffer.feed(b"0123456789"), [])
+        self.assertEqual(len(buffer._pending), 8)
+        self.assertTrue(buffer._line_truncated)
+        self.assertEqual(
+            buffer.feed(b"abcdef\\nnext\\n"),
+            ["01234567 … [line truncated]", "next"],
+        )
+        self.assertEqual(buffer._pending, "")
+        self.assertFalse(buffer._line_truncated)
+
+    def test_truncated_partial_line_is_flushed_on_process_exit(self):
+        buffer = ProcessOutputBuffer(max_line_chars=8)
+        self.assertEqual(buffer.feed(b"0123456789"), [])
+        self.assertEqual(
+            buffer.feed(b"", final=True),
+            ["01234567 … [line truncated]"],
+        )
+
+    def test_maximum_line_length_must_be_a_positive_integer(self):
+        for value in (0, -1, True, 1.5, "8"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ProcessOutputBuffer(max_line_chars=value)
+
+
 class SessionLogWriterTests(unittest.TestCase):
     def test_session_log_is_created_and_written_as_utf8(self):
         with tempfile.TemporaryDirectory() as directory:
