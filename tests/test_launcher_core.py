@@ -2355,7 +2355,7 @@ class ProcessOutputBufferTests(unittest.TestCase):
         self.assertEqual(len(buffer._pending), 8)
         self.assertTrue(buffer._line_truncated)
         self.assertEqual(
-            buffer.feed(b"abcdef\\nnext\\n"),
+            buffer.feed(b"abcdef\nnext\n"),
             ["01234567 … [line truncated]", "next"],
         )
         self.assertEqual(buffer._pending, "")
