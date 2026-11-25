@@ -2052,6 +2052,28 @@ def validate_extra_jvm_arguments(arguments):
     return validated
 
 
+def parse_extra_jvm_arguments(value):
+    """Tokenize the Settings field without consuming Windows path backslashes.
+
+    Double/single quotes group values containing spaces. Backslashes are literal
+    characters, not POSIX shell escapes; this keeps values such as C:\\Users\\Player
+    intact when the launcher runs on Windows.
+    """
+    if not isinstance(value, str):
+        raise ValueError("Additional JVM arguments must be entered as text.")
+    if any(character in value for character in "\\x00\\r\\n"):
+        raise ValueError("Additional JVM arguments must be on a single line.")
+    lexer = shlex.shlex(value, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.escape = ""
+    try:
+        parsed = list(lexer)
+    except ValueError as exc:
+        raise ValueError(f"Invalid JVM arguments: {exc}") from exc
+    return validate_extra_jvm_arguments(parsed)
+
+
 def build_launch_plan(version_metadata, *, java_executable, client_jar,
                       libraries_root, natives_directory, game_directory,
                       assets_root, auth, java_validation=None, jvm_arguments=None,
