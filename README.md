@@ -42,8 +42,7 @@ The Launch button performs a background preflight and starts a real Java process
 
 ## JVM argument safety
 
-The RAM selector owns the launcher's initial and maximum heap settings. Custom JVM flags remain available for tuning, but VOIDEX rejects flags that would replace its managed heap size, classpath, native-library path, verified Log4j2 configuration, or Java launch mode. This prevents duplicate options from silently overriding the selected RAM or verified launch files. The Settings field groups quoted values containing spaces while preserving Windows backslashes, so a value such as -Duser.home=C:\\Users\\Player is not silently changed during tokenization. The Settings field groups quoted values containing spaces while preserving Windows backslashes, so a value such as `-Duser.home=C:\\Users\\Player` is not silently changed during tokenization.
-
+The RAM selector owns the launcher's initial and maximum heap settings. Custom JVM flags remain available for tuning, but VOIDEX rejects flags that would replace its managed heap size, classpath, native-library path, verified Log4j2 configuration, or Java launch mode. This prevents duplicate options from silently overriding the selected RAM or verified launch files. The Settings field groups quoted values containing spaces while preserving Windows backslashes, so a value such as `-Duser.home=C:\Users\Player` is not silently changed during tokenization.
 ## Requirements
 
 - Python 3.11+
