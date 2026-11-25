@@ -2061,7 +2061,7 @@ def parse_extra_jvm_arguments(value):
     """
     if not isinstance(value, str):
         raise ValueError("Additional JVM arguments must be entered as text.")
-    if any(character in value for character in "\\x00\\r\\n"):
+    if any(character in value for character in "\x00\r\n"):
         raise ValueError("Additional JVM arguments must be on a single line.")
     lexer = shlex.shlex(value, posix=True)
     lexer.whitespace_split = True
