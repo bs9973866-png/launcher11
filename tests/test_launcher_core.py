@@ -2334,7 +2334,7 @@ class ExtraJvmArgumentParsingTests(unittest.TestCase):
     def test_preserves_backslashes_in_unquoted_windows_paths(self):
         self.assertEqual(
             parse_extra_jvm_arguments(r"-Duser.home=C:\Users\Player"),
-            [r"-Duser.home=C:\\Users\\Player"],
+            [r"-Duser.home=C:\Users\Player"],
         )
 
     def test_preserves_quoted_windows_paths_with_spaces(self):
