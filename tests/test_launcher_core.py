@@ -2333,16 +2333,16 @@ class InstalledModManagementTests(unittest.TestCase):
 class ExtraJvmArgumentParsingTests(unittest.TestCase):
     def test_preserves_backslashes_in_unquoted_windows_paths(self):
         self.assertEqual(
-            parse_extra_jvm_arguments(r"-Duser.home=C:\\Users\\Player"),
+            parse_extra_jvm_arguments(r"-Duser.home=C:\Users\Player"),
             [r"-Duser.home=C:\\Users\\Player"],
         )
 
     def test_preserves_quoted_windows_paths_with_spaces(self):
         self.assertEqual(
             parse_extra_jvm_arguments(
-                r'-Djava.home="C:\\Program Files\\Java\\bin" -XX:+UseG1GC'
+                r'-Djava.home="C:\Program Files\Java\bin" -XX:+UseG1GC'
             ),
-            [r"-Djava.home=C:\\Program Files\\Java\\bin", "-XX:+UseG1GC"],
+            [r"-Djava.home=C:\Program Files\Java\bin", "-XX:+UseG1GC"],
         )
 
     def test_managed_jvm_flags_are_rejected_after_tokenization(self):
@@ -2353,7 +2353,7 @@ class ExtraJvmArgumentParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid JVM arguments"):
             parse_extra_jvm_arguments('-Dvalue="unfinished')
         with self.assertRaisesRegex(ValueError, "single line"):
-            parse_extra_jvm_arguments("-Dfirst=1\\n-Xmx2G")
+            parse_extra_jvm_arguments("-Dfirst=1\n-Xmx2G")
 
     def test_empty_argument_text_is_allowed(self):
         self.assertEqual(parse_extra_jvm_arguments("  "), [])
