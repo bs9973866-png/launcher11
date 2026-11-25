@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shlex
 import sys
 import urllib.request
 import uuid
@@ -13,7 +12,7 @@ from launcher_core import (ProcessOutputBuffer, SessionLogWriter, fetch_version_
                             download_verified_version_json, download_verified_logging_config, resolve_library_artifacts,
                             download_verified_libraries, resolve_asset_objects, materialize_asset_index, extract_native_archives, verify_cached_native_archives,
                             discover_java_candidates, validate_java_executable, required_java_major,
-                            build_launch_plan, shutdown_block_reason, verify_cached_asset_objects, resolve_asset_index_reference, prepare_legacy_asset_directory, verify_cached_version_json,
+                            parse_extra_jvm_arguments, build_launch_plan, shutdown_block_reason, verify_cached_asset_objects, resolve_asset_index_reference, prepare_legacy_asset_directory, verify_cached_version_json,
                             install_temurin_runtime, search_modrinth_mods,
                             fetch_modrinth_compatible_version, download_verified_modrinth_file, list_installed_mods, remove_installed_mod,
                             fetch_fabric_loader_versions, install_fabric_loader, merge_fabric_profile_metadata,
@@ -2918,7 +2917,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "VOIDEX", "The selected version is not in the loaded Mojang catalog.")
             return
         try:
-            extra_jvm = shlex.split(self.jvm.text().strip()) if self.jvm.text().strip() else []
+            extra_jvm = parse_extra_jvm_arguments(self.jvm.text())
         except ValueError as exc:
             QMessageBox.warning(self, "VOIDEX", f"Invalid JVM arguments: {exc}")
             return
