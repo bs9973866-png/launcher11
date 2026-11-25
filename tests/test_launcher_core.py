@@ -15,7 +15,7 @@ from launcher_core import (ProcessOutputBuffer, SessionLogWriter, download_verif
                            fetch_version_manifest, fetch_version_metadata, MojangMetadataRedirectHandler,
                            resolve_asset_objects, resolve_library_artifacts, summarize_version_metadata, required_java_major,
                            extract_native_archives, verify_cached_native_archives, discover_java_candidates, validate_java_executable,
-                           build_minecraft_classpath, build_launch_plan, validate_extra_jvm_arguments, shutdown_block_reason,
+                           build_minecraft_classpath, build_launch_plan, validate_extra_jvm_arguments, parse_extra_jvm_arguments, shutdown_block_reason,
                            verify_cached_asset_objects, materialize_asset_index, resolve_asset_index_reference, prepare_legacy_asset_directory, verify_cached_version_json, safe_extract_temurin_zip,
                            _fetch_temurin_asset, install_temurin_runtime,
                            search_modrinth_mods, fetch_modrinth_compatible_version,
@@ -2328,6 +2328,35 @@ class InstalledModManagementTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "symbolic-link"):
                 remove_installed_mod(root, "linked.jar")
             self.assertEqual(outside.read_bytes(), b"outside")
+
+
+class ExtraJvmArgumentParsingTests(unittest.TestCase):
+    def test_preserves_backslashes_in_unquoted_windows_paths(self):
+        self.assertEqual(
+            parse_extra_jvm_arguments(r"-Duser.home=C:\\Users\\Player"),
+            [r"-Duser.home=C:\\Users\\Player"],
+        )
+
+    def test_preserves_quoted_windows_paths_with_spaces(self):
+        self.assertEqual(
+            parse_extra_jvm_arguments(
+                r'-Djava.home="C:\\Program Files\\Java\\bin" -XX:+UseG1GC'
+            ),
+            [r"-Djava.home=C:\\Program Files\\Java\\bin", "-XX:+UseG1GC"],
+        )
+
+    def test_managed_jvm_flags_are_rejected_after_tokenization(self):
+        with self.assertRaisesRegex(ValueError, "managed by VOIDEX"):
+            parse_extra_jvm_arguments("-Xmx8G")
+
+    def test_unclosed_quotes_and_line_breaks_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Invalid JVM arguments"):
+            parse_extra_jvm_arguments('-Dvalue="unfinished')
+        with self.assertRaisesRegex(ValueError, "single line"):
+            parse_extra_jvm_arguments("-Dfirst=1\\n-Xmx2G")
+
+    def test_empty_argument_text_is_allowed(self):
+        self.assertEqual(parse_extra_jvm_arguments("  "), [])
 
 
 class ProcessOutputBufferTests(unittest.TestCase):
