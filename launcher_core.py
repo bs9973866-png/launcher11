@@ -1667,6 +1667,7 @@ class TemurinRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _fetch_temurin_asset(expected_major, opener=None):
+    """Fetch and validate one official Windows x64 Eclipse Temurin JDK package."""
     if (not isinstance(expected_major, int) or isinstance(expected_major, bool)
             or expected_major < 8 or expected_major > 99):
         raise ValueError("Unsupported Java major version requested.")
@@ -1690,6 +1691,7 @@ def _fetch_temurin_asset(expected_major, opener=None):
         raise ValueError("Temurin returned invalid release metadata.") from exc
     if not isinstance(assets, list) or not assets:
         raise ValueError(f"Eclipse Temurin has no Windows x64 JDK for Java {expected_major}.")
+
     for release in assets:
         if not isinstance(release, dict):
             continue
@@ -1697,30 +1699,50 @@ def _fetch_temurin_asset(expected_major, opener=None):
         if not isinstance(binary, dict):
             continue
         package = binary.get("package")
-        version = release.get("version") or {}
-        if (binary.get("os") != "windows" or binary.get("architecture") != "x64"
-                or binary.get("image_type") != "jdk" or not isinstance(package, dict)):
+        if (binary.get("os") != "windows"
+                or binary.get("architecture") != "x64"
+                or binary.get("image_type") != "jdk"
+                or not isinstance(package, dict)):
             continue
-            link = package.get("link")
-            parsed_link = urlparse(link if isinstance(link, str) else "")
-            checksum = package.get("checksum")
-            size = package.get("size")
-            name = package.get("name")
-            if (parsed_link.scheme != "https" or parsed_link.hostname != "github.com"
-                    or parsed_link.username is not None or parsed_link.password is not None):
-                continue
-            if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", checksum):
-                continue
-            if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= MAX_TEMURIN_ARCHIVE_BYTES:
-                continue
-            if not isinstance(name, str) or not name.lower().endswith(".zip") or Path(name).name != name:
-                continue
-            major = version.get("major") if isinstance(version, dict) else None
-            if major is not None and major != expected_major:
-                continue
-            return {"url": link, "sha256": checksum.lower(), "size": size, "name": name}
-    raise ValueError("Temurin metadata did not contain a valid Windows x64 JDK ZIP package.")
 
+        link = package.get("link")
+        parsed_link = urlparse(link if isinstance(link, str) else "")
+        try:
+            port = parsed_link.port
+        except ValueError:
+            continue
+        if (parsed_link.scheme != "https" or parsed_link.hostname != "github.com"
+                or parsed_link.username is not None or parsed_link.password is not None
+                or parsed_link.fragment or port not in (None, 443)
+                or not parsed_link.path):
+            continue
+
+        checksum = package.get("checksum")
+        size = package.get("size")
+        name = package.get("name")
+        if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", checksum):
+            continue
+        if (not isinstance(size, int) or isinstance(size, bool)
+                or not 0 < size <= MAX_TEMURIN_ARCHIVE_BYTES):
+            continue
+        if (not isinstance(name, str) or not name.lower().endswith(".zip")
+                or "/" in name or "\\" in name or PurePosixPath(name).name != name):
+            continue
+
+        version = release.get("version")
+        major = version.get("major") if isinstance(version, dict) else None
+        if major is not None and (
+            not isinstance(major, int) or isinstance(major, bool) or major != expected_major
+        ):
+            continue
+        return {
+            "url": link,
+            "sha256": checksum.lower(),
+            "size": size,
+            "name": name,
+        }
+
+    raise ValueError("Temurin metadata did not contain a valid Windows x64 JDK ZIP package.")
 
 def safe_extract_temurin_zip(archive_path, destination):
     """Extract a Temurin ZIP while rejecting traversal, links and resource bombs."""
