@@ -1352,6 +1352,21 @@ class TemurinRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "valid Windows x64"):
             _fetch_temurin_asset(21, opener=Opener())
 
+    def test_rejects_invalid_java_major_before_creating_runtime_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtimes_root = Path(directory) / "runtimes"
+            for major in (True, 7, 100, "../../outside", None):
+                with self.subTest(major=major):
+                    with self.assertRaisesRegex(ValueError, "Unsupported Java major"):
+                        install_temurin_runtime(major, runtimes_root)
+                    self.assertFalse(runtimes_root.exists())
+
+    def test_fetch_rejects_boolean_java_major_without_network_access(self):
+        opener = Mock()
+        with self.assertRaisesRegex(ValueError, "Unsupported Java major"):
+            _fetch_temurin_asset(True, opener=opener)
+        opener.open.assert_not_called()
+
     def test_runtime_installer_is_windows_only_on_this_platform(self):
         if os.name == "nt":
             self.skipTest("Windows platform")
