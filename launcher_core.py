@@ -1666,11 +1666,17 @@ class TemurinRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _fetch_temurin_asset(expected_major, opener=None):
-    """Fetch and validate one official Windows x64 Eclipse Temurin JDK package."""
+def _validate_temurin_major(expected_major):
+    """Validate a Java major before it is used in paths or network requests."""
     if (not isinstance(expected_major, int) or isinstance(expected_major, bool)
             or expected_major < 8 or expected_major > 99):
         raise ValueError("Unsupported Java major version requested.")
+    return expected_major
+
+
+def _fetch_temurin_asset(expected_major, opener=None):
+    """Fetch and validate one official Windows x64 Eclipse Temurin JDK package."""
+    _validate_temurin_major(expected_major)
     url = (
         f"https://{TEMURIN_API_HOST}/v3/assets/latest/{expected_major}/hotspot"
         "?architecture=x64&image_type=jdk&os=windows&vendor=eclipse"
@@ -1830,6 +1836,9 @@ def safe_extract_temurin_zip(archive_path, destination):
 def install_temurin_runtime(expected_major, runtimes_root, progress_callback=None,
                             metadata_opener=None, download_opener=None):
     """Download, SHA-256 verify, safely extract and validate an official Temurin JDK."""
+    # Validate before constructing a version-specific path. An unchecked value
+    # must never influence the target directory or cleanup operations below.
+    _validate_temurin_major(expected_major)
     if os.name != "nt":
         raise ValueError("Automatic Temurin installation currently supports Windows x64 only.")
     runtime_root = Path(runtimes_root).expanduser().resolve()
