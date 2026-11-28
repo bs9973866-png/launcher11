@@ -310,6 +310,42 @@ class ClientDownloadTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"previous safe file")
             self.assertEqual(list(Path(directory).glob("*.part")), [])
 
+    def test_symlinked_client_cache_file_is_replaced_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside.jar"
+            outside.write_bytes(self.payload)
+            target = root / "client.jar"
+            try:
+                target.symlink_to(outside)
+            except (OSError, NotImplementedError):
+                self.skipTest("Symlinks are unavailable on this runner.")
+            opener = Mock()
+            opener.open.return_value = FakeResponse(self.payload)
+            result = download_verified_client(self.summary, target, opener=opener)
+            self.assertEqual(result, target)
+            opener.open.assert_called_once()
+            self.assertFalse(target.is_symlink())
+            self.assertEqual(target.read_bytes(), self.payload)
+            self.assertEqual(outside.read_bytes(), self.payload)
+
+    def test_rejects_symlinked_client_cache_parent_before_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            linked_parent = root / "clients"
+            try:
+                linked_parent.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("Directory symlinks are unavailable on this runner.")
+            opener = Mock()
+            target = linked_parent / "client.jar"
+            with self.assertRaisesRegex(ValueError, "symbolic-link directory"):
+                download_verified_client(self.summary, target, opener=opener)
+            opener.open.assert_not_called()
+            self.assertFalse((outside / "client.jar").exists())
+
     def test_rejects_untrusted_url_before_network(self):
         with tempfile.TemporaryDirectory() as directory:
             bad = dict(self.summary, client_url="https://example.org/client.jar")
