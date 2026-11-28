@@ -351,6 +351,14 @@ class MojangMetadataRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _reject_symlinked_directory_path(directory, description):
+    """Reject symlinked directory components before writing into a cache path."""
+    path = Path(directory).expanduser()
+    for component in (path, *path.parents):
+        if component.is_symlink():
+            raise ValueError(f"{description} contains a symbolic-link directory.")
+
+
 def download_verified_client(summary, destination, progress_callback=None, opener=None):
     """Stream a Mojang client JAR to a temp file; verify size/SHA-1 before atomic replace."""
     if not isinstance(summary, dict):
@@ -366,9 +374,17 @@ def download_verified_client(summary, destination, progress_callback=None, opene
     if not isinstance(expected_size, int) or isinstance(expected_size, bool) or expected_size <= 0:
         raise ValueError("Invalid expected download size.")
 
-    target = Path(destination)
+    target = Path(destination).expanduser()
+    _reject_symlinked_directory_path(target.parent, "Client JAR cache path")
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.is_file() and target.stat().st_size == expected_size:
+    _reject_symlinked_directory_path(target.parent, "Client JAR cache path")
+    if target.is_symlink() and target.is_dir():
+        raise ValueError("Client JAR cache destination cannot be a directory symbolic link.")
+    if target.exists() and not target.is_file() and not target.is_symlink():
+        raise ValueError("Client JAR cache destination is not a regular file.")
+    # A symlink leaf is deliberately not reused. os.replace below replaces the
+    # link itself with the verified temporary file, without writing to its target.
+    if not target.is_symlink() and target.is_file() and target.stat().st_size == expected_size:
         digest = hashlib.sha1()
         with target.open("rb") as existing:
             for chunk in iter(lambda: existing.read(DOWNLOAD_CHUNK_SIZE), b""):
